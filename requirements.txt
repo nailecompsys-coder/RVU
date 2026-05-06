@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+python-jose[cryptography]
+python-multipart
+pillow
+python-dotenv
+paddleocr
+paddlepaddle==3.2.2

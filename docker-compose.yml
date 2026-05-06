@@ -1,0 +1,9 @@
+services:
+  rvu_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rvu_api
+    restart: unless-stopped
+    env_file: .env
+    network_mode: host

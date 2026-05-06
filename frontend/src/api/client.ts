@@ -1,0 +1,416 @@
+// ── localStorage token (fallback for iOS cookie isolation) ───────────────────
+const LS_KEY = "rvu_surgeon_token";
+const getLocalToken = (): string | null => {
+  try { return localStorage.getItem(LS_KEY); } catch { return null; }
+};
+const setLocalToken = (t: string): void => {
+  try { localStorage.setItem(LS_KEY, t); } catch { /* ignore */ }
+};
+
+/** True if this browser already stored a staff JWT (PWA / iOS home screen). */
+export function hasStaffSession(): boolean {
+  return Boolean(getLocalToken());
+}
+
+// Returns Authorization header if we have a local token stored
+const authHeaders = (): Record<string, string> => {
+  const t = getLocalToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+};
+
+const json = async <T>(path: string, init?: RequestInit): Promise<T> => {
+  const r = await fetch(path, {
+    ...init,
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(),
+      ...(init?.headers as Record<string, string>),
+    },
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error((err as { detail?: string }).detail || r.statusText);
+  }
+  return r.json() as Promise<T>;
+};
+
+export const api = {
+  register: async (token: string) => {
+    const r = await json<{ ok: boolean; token?: string; surgeon: Record<string, unknown> }>(
+      "/api/v1/auth/register",
+      { method: "POST", body: JSON.stringify({ token }) }
+    );
+    // Persist JWT to localStorage so it survives iOS cookie isolation
+    if (r.token) setLocalToken(r.token);
+    return r;
+  },
+  meStaff: () => json<StaffMe>("/api/v1/auth/me"),
+  mePortal: () => json<PortalMe>("/api/v1/auth/portal/me"),
+  portalLogin: (username: string, password: string) =>
+    json<{ ok: boolean }>("/api/v1/auth/portal/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  portalLogout: () => json<{ ok: boolean }>("/api/v1/auth/portal/logout", { method: "POST" }),
+  staffLogout: () => json<{ ok: boolean }>("/api/v1/auth/logout", { method: "POST" }),
+  localities: () => json<LocalitiesResponse>("/api/v1/rvu/localities"),
+  getVisionConfig: () => json<{ provider: string; vision_model: string; text_model: string }>("/api/v1/rvu/vision-config"),
+  getStaffDevVisionConfig: () => json<{ provider: string; vision_model: string; text_model: string; openai_key_set?: string; anthropic_key_set?: string }>("/api/v1/rvu/dev/vision-config"),
+  patchStaffDevVisionConfig: (body: { provider?: string; vision_model?: string; openai_api_key?: string; anthropic_api_key?: string }) =>
+    json<{ provider: string; vision_model: string; text_model: string; openai_key_set?: string; anthropic_key_set?: string }>("/api/v1/rvu/dev/vision-config", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  history: () => json<{ scans: ScanRow[] }>("/api/v1/rvu/history"),
+  portalScans: (limit = 500) =>
+    json<{ scans: PortalScanRow[] }>(`/api/v1/portal/rvu/scans?limit=${limit}`),
+  adminStaff: (includeInactive = false) =>
+    json<{ staff: StaffMember[] }>(`/api/v1/auth/admin/staff${includeInactive ? "?include_inactive=true" : ""}`),
+  createStaff: (body: StaffCreateBody) =>
+    json<StaffMember>("/api/v1/auth/admin/staff", { method: "POST", body: JSON.stringify(body) }),
+  patchStaff: (id: number, body: StaffPatchBody) =>
+    json<StaffMember>(`/api/v1/auth/admin/staff/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  listDevices: () => json<{ devices: DeviceRecord[] }>("/api/v1/auth/admin/devices"),
+  patchDevice: (id: number, body: { is_active: boolean }) =>
+    json<DeviceRecord>(`/api/v1/auth/admin/devices/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  sendMagicLink: (surgeon_id: number) =>
+    json<{ ok: boolean; surgeon: string; email: string | null; magic_url: string; qr_b64: string; emailed: boolean }>(
+      "/api/v1/auth/admin/send-magic-link",
+      { method: "POST", body: JSON.stringify({ surgeon_id }) }
+    ),
+  patchScan: (id: number, body: ScanPatchBody) =>
+    json<PortalScanRow>(`/api/v1/portal/rvu/scans/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteScan: async (id: number) => {
+    const r = await fetch(`/api/v1/portal/rvu/scans/${id}`, {
+      method: "DELETE",
+      credentials: "include",
+      headers: authHeaders(),
+    });
+    if (!r.ok && r.status !== 204) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error((err as { detail?: string }).detail || r.statusText);
+    }
+  },
+  listPortalUsers: () => json<{ users: PortalUserRecord[] }>("/api/v1/auth/portal/users"),
+  createPortalUser: (body: PortalUserCreateBody) =>
+    json<PortalUserRecord>("/api/v1/auth/portal/users", { method: "POST", body: JSON.stringify(body) }),
+  patchPortalUser: (id: number, body: PortalUserPatchBody) =>
+    json<PortalUserRecord>(`/api/v1/auth/portal/users/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deletePortalUser: async (id: number) => {
+    const r = await fetch(`/api/v1/auth/portal/users/${id}`, {
+      method: "DELETE",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error((err as { detail?: string }).detail || r.statusText);
+    }
+    return r.json() as Promise<{ ok: boolean }>;
+  },
+  listPortalOpNotes: () => json<{ notes: OpNoteRow[] }>("/api/v1/portal/rvu/op-notes"),
+  getDevVisionConfig: () => json<{ provider: string; vision_model: string; text_model: string; openai_key_set?: string; anthropic_key_set?: string }>("/api/v1/portal/rvu/dev/vision-config"),
+  patchDevVisionConfig: (body: { provider?: string; vision_model?: string; openai_api_key?: string; anthropic_api_key?: string }) =>
+    json<{ provider: string; vision_model: string; text_model: string; openai_key_set?: string; anthropic_key_set?: string }>("/api/v1/portal/rvu/dev/vision-config", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deletePortalOpNote: async (id: number) => {
+    const r = await fetch(`/api/v1/portal/rvu/op-notes/${id}`, {
+      method: "DELETE",
+      credentials: "include",
+      headers: authHeaders(),
+    });
+    if (!r.ok && r.status !== 204) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error((err as { detail?: string }).detail || r.statusText);
+    }
+  },
+  uploadOpNote: async (blob: Blob) => {
+    const fd = new FormData();
+    fd.append("image", blob, "opnote.jpg");
+    const r = await fetch("/api/v1/rvu/op-note", {
+      method: "POST",
+      credentials: "include",
+      headers: authHeaders(),
+      body: fd,
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error((err as { detail?: string }).detail || r.statusText);
+    }
+    return r.json() as Promise<{
+      ok: boolean;
+      id: number;
+      extracted_text: string;
+      image_kb: number;
+      elapsed_secs: number;
+      ai_model: string;
+    }>;
+  },
+  lookup: (body: LookupBody) =>
+    json<LookupResponse>("/api/v1/rvu/lookup", { method: "POST", body: JSON.stringify(body) }),
+  preview: (body: LookupBody) =>
+    json<LookupResponse>("/api/v1/rvu/preview", { method: "POST", body: JSON.stringify(body) }),
+  commit: async (body: CommitBody, imageBlob?: Blob): Promise<CommitResponse> => {
+    const fd = new FormData();
+    fd.append("cpts", JSON.stringify(body.cpts));
+    fd.append("locality", body.locality);
+    fd.append("facility", String(body.facility));
+    fd.append("cf", String(body.cf));
+    if (body.service_date) fd.append("service_date", body.service_date);
+    if (body.mrn) fd.append("mrn", body.mrn);
+    fd.append("lines", JSON.stringify(body.lines ?? []));
+    fd.append("ai_model", body.ai_model ?? "vision");
+    fd.append("image_kb", String(body.image_kb ?? 0));
+    fd.append("elapsed_secs", String(body.elapsed_secs ?? 0));
+    if (imageBlob) fd.append("image", imageBlob, "scan.jpg");
+    const r = await fetch("/api/v1/rvu/commit", { method: "POST", credentials: "include", headers: authHeaders(), body: fd });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error((err as { detail?: string }).detail || r.statusText);
+    }
+    return r.json() as Promise<CommitResponse>;
+  },
+  consumeRvuSse: async (
+    url: string,
+    init: RequestInit,
+    handlers: { onToken?: (t: string) => void; onStatus?: (msg: string) => void; onError?: (msg: string) => void }
+  ): Promise<RvuStreamDone | null> => {
+    const r = await fetch(url, { ...init, credentials: "include", headers: { ...authHeaders(), ...(init.headers as Record<string, string> | undefined) } });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error((err as { detail?: string }).detail || r.statusText);
+    }
+    const reader = r.body?.getReader();
+    if (!reader) return null;
+    const dec = new TextDecoder();
+    let buf = "";
+    let donePayload: RvuStreamDone | null = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n\n");
+      buf = parts.pop() ?? "";
+      for (const block of parts) {
+        const parsed = parseSseBlock(block);
+        if (!parsed) continue;
+        if (parsed.event === "token" && handlers.onToken) {
+          try {
+            const j = JSON.parse(parsed.data) as { t?: string };
+            if (j.t) handlers.onToken(j.t);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (parsed.event === "status") {
+          try {
+            const j = JSON.parse(parsed.data) as { msg?: string };
+            if (j.msg) handlers.onStatus?.(j.msg);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (parsed.event === "error") {
+          try {
+            const j = JSON.parse(parsed.data) as { msg?: string };
+            handlers.onError?.(j.msg || "Stream error");
+          } catch {
+            handlers.onError?.("Stream error");
+          }
+          return null;
+        }
+        if (parsed.event === "done") {
+          try {
+            donePayload = JSON.parse(parsed.data) as RvuStreamDone;
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+    return donePayload;
+  },
+};
+
+function parseSseBlock(block: string): { event: string; data: string } | null {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (dataLines.length === 0) return null;
+  return { event, data: dataLines.join("\n") };
+}
+
+export type StaffMe = {
+  id: number;
+  full_name: string;
+  staff_type: string;
+  email: string | null;
+  suffix: string | null;
+};
+
+export type PortalMe = { id: number; username: string; email: string; role: string };
+
+export type PortalUserRecord = {
+  id: number;
+  username: string;
+  email: string;
+  role: string;
+  is_active: boolean;
+  created_at: string | null;
+};
+
+export type PortalUserCreateBody = {
+  username: string;
+  email: string;
+  password: string;
+  role?: string;
+};
+
+export type PortalUserPatchBody = {
+  email?: string;
+  password?: string;
+  role?: string;
+  is_active?: boolean;
+};
+
+export type OpNoteRow = {
+  id: number;
+  surgeon_id: number;
+  surgeon_name: string | null;
+  scanned_at: string | null;
+  image_kb: number;
+  extracted_text: string;
+  ai_model: string | null;
+  elapsed_secs: number | null;
+  has_image: boolean;
+};
+
+export type LocalitiesResponse = {
+  localities: { locality_num: string; locality_name: string; state: string }[];
+  cf: number;
+};
+
+export type CaptureLine = {
+  cpt: string;
+  procedure_name: string;
+  provider_name?: string;
+  provider_role?: string;
+  modifier?: string;
+  is_assist?: boolean;
+};
+
+export type ScanRow = {
+  id: number;
+  scanned_at: string | null;
+  service_date?: string | null;
+  mrn?: string | null;
+  line_items?: unknown;
+  total_rvu: number;
+  total_payment: number;
+  cf?: number;
+  locality_name: string | null;
+  facility: boolean;
+  ai_model: string | null;
+  has_image?: boolean;
+};
+
+export type PortalScanRow = ScanRow & {
+  surgeon_id: number;
+  surgeon_name: string | null;
+  staff_type: string | null;
+};
+
+export type ScanPatchBody = {
+  service_date?: string | null;
+  mrn?: string | null;
+  locality_num?: string;
+  locality_name?: string;
+  facility?: boolean;
+  cpts?: string[];
+};
+
+export type StaffMember = {
+  id: number;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  staff_type: string | null;
+  email: string | null;
+  suffix: string | null;
+  is_active: boolean;
+};
+
+export type StaffPatchBody = {
+  first_name?: string;
+  last_name?: string;
+  suffix?: string;
+  staff_type?: string;
+  email?: string;
+  is_active?: boolean;
+};
+
+export type DeviceRecord = {
+  id: number;
+  surgeon_id: number;
+  surgeon_name: string;
+  device_name: string;
+  user_agent: string | null;
+  registered_at: string | null;
+  last_seen: string | null;
+  is_active: boolean;
+};
+
+export type StaffCreateBody = {
+  first_name: string;
+  last_name: string;
+  suffix?: string;
+  staff_type?: string;
+  email?: string;
+};
+
+export type LookupBody = {
+  cpts: string[];
+  locality: string;
+  facility: boolean;
+  cf: number;
+};
+
+export type LookupResponse = { cpts: string[]; rows: unknown[]; total_payment: number };
+
+export type CommitBody = {
+  cpts: string[];
+  locality: string;
+  facility: boolean;
+  cf: number;
+  service_date?: string | null;
+  mrn?: string | null;
+  lines: CaptureLine[];
+  ai_model: string;
+  image_kb: number;
+  elapsed_secs: number;
+};
+
+export type CommitResponse = LookupResponse & { line_items: unknown[] };
+
+export type RvuStreamDone = LookupResponse & {
+  service_date?: string | null;
+  mrn?: string | null;
+  surgeon_name?: string | null;
+  lines?: CaptureLine[];
+  doc_type_guess?: "charge_sheet" | "op_note" | "unknown";
+  elapsed_secs?: number;
+  persisted?: boolean;
+  ai_model?: string;
+};

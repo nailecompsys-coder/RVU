@@ -1,0 +1,295 @@
+"""Portal-managed CPT recognition and modifier rule overrides."""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import asdict
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.cal_models import SchedulingRuleConfig
+from app.rvu.lookup import (
+    DEFAULT_MODIFIER_DESC,
+    DEFAULT_MODIFIER_FACTORS,
+    RvuRow,
+    get_rvu_catalog,
+)
+
+CPT_RULE_CONFIG_ID = "rvu_cpt_rules"
+MODIFIER_RULE_CONFIG_ID = "rvu_modifier_rules"
+
+
+@lru_cache(maxsize=1)
+def _general_surgery_focus_cpts() -> set[str]:
+    path = Path(__file__).resolve().parents[1] / "rvu" / "data" / "general_surgery_cpts.json"
+    try:
+        raw = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+    if not isinstance(raw, list):
+        return set()
+    return {
+        code
+        for code in (_clean_cpt(item) for item in raw)
+        if len(code) == 5
+    }
+
+
+def _load_rule_config(db: Session, rule_id: str) -> dict[str, Any]:
+    row = db.query(SchedulingRuleConfig).filter(SchedulingRuleConfig.rule_id == rule_id).first()
+    if not row or not row.config:
+        return {}
+    try:
+        parsed = json.loads(row.config)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _save_rule_config(db: Session, rule_id: str, payload: dict[str, Any]) -> None:
+    row = db.query(SchedulingRuleConfig).filter(SchedulingRuleConfig.rule_id == rule_id).first()
+    if not row:
+        row = SchedulingRuleConfig(rule_id=rule_id, enabled=True, config="{}")
+        db.add(row)
+    row.enabled = True
+    row.config = json.dumps(payload, sort_keys=True)
+    db.commit()
+
+
+def _clean_cpt(code: str) -> str:
+    return re.sub(r"[^\d]", "", str(code or "").strip())[:5]
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _catalog_status(entry: dict[str, Any]) -> str:
+    if bool(entry.get("is_custom")):
+        return "custom"
+    if not bool(entry.get("recognized")):
+        return "disabled"
+    if bool(entry.get("has_override")):
+        return "override"
+    return "catalog"
+
+
+def get_effective_modifier_rules(db: Session) -> dict[str, dict[str, object]]:
+    overrides = _load_rule_config(db, MODIFIER_RULE_CONFIG_ID)
+    rules: dict[str, dict[str, object]] = {
+        code: {"code": code, "factor": factor, "desc": DEFAULT_MODIFIER_DESC.get(code, code)}
+        for code, factor in DEFAULT_MODIFIER_FACTORS.items()
+    }
+    for code, raw in overrides.items():
+        if not isinstance(raw, dict):
+            continue
+        key = str(code or "").strip().upper()
+        if not key:
+            continue
+        rule = rules.get(key, {"code": key, "factor": 1.0, "desc": key})
+        factor = _coerce_float(raw.get("factor"))
+        desc = str(raw.get("desc") or "").strip()
+        if factor is not None:
+            rule["factor"] = factor
+        if desc:
+            rule["desc"] = desc
+        rules[key] = rule
+    return rules
+
+
+def list_modifier_rules(db: Session) -> list[dict[str, object]]:
+    rules = get_effective_modifier_rules(db)
+    return [rules[code] for code in sorted(rules)]
+
+
+def patch_modifier_rule(
+    db: Session,
+    code: str,
+    *,
+    factor: float | None = None,
+    desc: str | None = None,
+) -> dict[str, object]:
+    key = str(code or "").strip().upper()
+    if not key:
+        raise ValueError("Modifier code is required")
+    overrides = _load_rule_config(db, MODIFIER_RULE_CONFIG_ID)
+    current = overrides.get(key, {})
+    if not isinstance(current, dict):
+        current = {}
+    if factor is not None:
+        current["factor"] = round(float(factor), 4)
+    if desc is not None:
+        current["desc"] = desc.strip()
+    overrides[key] = current
+    _save_rule_config(db, MODIFIER_RULE_CONFIG_ID, overrides)
+    return get_effective_modifier_rules(db)[key]
+
+
+def get_effective_cpt_catalog(db: Session) -> dict[str, dict[str, Any]]:
+    base_catalog = get_rvu_catalog()
+    overrides = _load_rule_config(db, CPT_RULE_CONFIG_ID)
+    focus_cpts = _general_surgery_focus_cpts()
+    catalog: dict[str, dict[str, Any]] = {}
+
+    for cpt, row in base_catalog.items():
+        if focus_cpts and cpt not in focus_cpts:
+            continue
+        catalog[cpt] = {
+            "cpt": cpt,
+            "recognized": True,
+            "desc": row.desc,
+            "work_rvu": row.work_rvu,
+            "pe_nonfac_rvu": row.pe_nonfac_rvu,
+            "pe_fac_rvu": row.pe_fac_rvu,
+            "mp_rvu": row.mp_rvu,
+            "is_custom": False,
+            "has_override": False,
+            "status": "catalog",
+        }
+
+    for raw_code, raw in overrides.items():
+        if not isinstance(raw, dict):
+            continue
+        cpt = _clean_cpt(raw_code)
+        if len(cpt) != 5:
+            continue
+        entry = catalog.get(
+            cpt,
+            {
+                "cpt": cpt,
+                "recognized": False,
+                "desc": "",
+                "work_rvu": 0.0,
+                "pe_nonfac_rvu": 0.0,
+                "pe_fac_rvu": 0.0,
+                "mp_rvu": 0.0,
+                "is_custom": True,
+                "has_override": True,
+            },
+        )
+        if "recognized" in raw:
+            entry["recognized"] = bool(raw.get("recognized"))
+        if raw.get("desc") not in (None, ""):
+            entry["desc"] = str(raw.get("desc")).strip()
+            entry["has_override"] = True
+        for key in ("work_rvu", "pe_nonfac_rvu", "pe_fac_rvu", "mp_rvu"):
+            coerced = _coerce_float(raw.get(key))
+            if coerced is not None:
+                entry[key] = coerced
+                entry["has_override"] = True
+        if entry["is_custom"] and raw.get("recognized") is None:
+            entry["recognized"] = True
+        entry["status"] = _catalog_status(entry)
+        catalog[cpt] = entry
+
+    return catalog
+
+
+def list_cpt_catalog(db: Session, search: str = "") -> list[dict[str, Any]]:
+    term = str(search or "").strip().lower()
+    if term:
+        base_catalog = get_rvu_catalog()
+        effective_catalog = get_effective_cpt_catalog(db)
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for cpt, row in effective_catalog.items():
+            desc = str(row.get("desc") or "")
+            if term not in cpt.lower() and term not in desc.lower():
+                continue
+            rows.append(row)
+            seen.add(cpt)
+
+        for cpt, row in base_catalog.items():
+            if cpt in seen:
+                continue
+            if term not in cpt.lower() and term not in row.desc.lower():
+                continue
+            rows.append(
+                {
+                    "cpt": cpt,
+                    "recognized": False,
+                    "desc": row.desc,
+                    "work_rvu": row.work_rvu,
+                    "pe_nonfac_rvu": row.pe_nonfac_rvu,
+                    "pe_fac_rvu": row.pe_fac_rvu,
+                    "mp_rvu": row.mp_rvu,
+                    "is_custom": False,
+                    "has_override": False,
+                    "status": "catalog",
+                }
+            )
+        rows.sort(key=lambda row: str(row.get("cpt") or ""))
+        return rows
+
+    catalog = get_effective_cpt_catalog(db)
+    rows = list(catalog.values())
+    rows.sort(key=lambda row: str(row.get("cpt") or ""))
+    return rows
+
+
+def get_recognized_cpts(db: Session) -> set[str]:
+    catalog = get_effective_cpt_catalog(db)
+    return {
+        cpt
+        for cpt, row in catalog.items()
+        if bool(row.get("recognized"))
+    }
+
+
+def get_effective_rvu_overrides(db: Session) -> dict[str, RvuRow]:
+    catalog = get_effective_cpt_catalog(db)
+    return {
+        cpt: RvuRow(
+            desc=str(row.get("desc") or ""),
+            work_rvu=float(row.get("work_rvu") or 0.0),
+            pe_nonfac_rvu=float(row.get("pe_nonfac_rvu") or 0.0),
+            pe_fac_rvu=float(row.get("pe_fac_rvu") or 0.0),
+            mp_rvu=float(row.get("mp_rvu") or 0.0),
+        )
+        for cpt, row in catalog.items()
+        if bool(row.get("recognized"))
+    }
+
+
+def patch_cpt_rule(
+    db: Session,
+    cpt: str,
+    *,
+    recognized: bool | None = None,
+    desc: str | None = None,
+    work_rvu: float | None = None,
+    pe_nonfac_rvu: float | None = None,
+    pe_fac_rvu: float | None = None,
+    mp_rvu: float | None = None,
+) -> dict[str, Any]:
+    clean = _clean_cpt(cpt)
+    if len(clean) != 5:
+        raise ValueError("CPT must be a 5-digit code")
+    overrides = _load_rule_config(db, CPT_RULE_CONFIG_ID)
+    current = overrides.get(clean, {})
+    if not isinstance(current, dict):
+        current = {}
+    if recognized is not None:
+        current["recognized"] = bool(recognized)
+    if desc is not None:
+        current["desc"] = desc.strip()
+    if work_rvu is not None:
+        current["work_rvu"] = round(float(work_rvu), 2)
+    if pe_nonfac_rvu is not None:
+        current["pe_nonfac_rvu"] = round(float(pe_nonfac_rvu), 2)
+    if pe_fac_rvu is not None:
+        current["pe_fac_rvu"] = round(float(pe_fac_rvu), 2)
+    if mp_rvu is not None:
+        current["mp_rvu"] = round(float(mp_rvu), 2)
+    overrides[clean] = current
+    _save_rule_config(db, CPT_RULE_CONFIG_ID, overrides)
+    return get_effective_cpt_catalog(db)[clean]

@@ -1,0 +1,45 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+AuthKey_*.p8
+
+# Python cache and virtualenvs
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Frontend dependencies and build artifacts
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+
+# Local tooling state
+.cursor/
+.codex
+.vscode/
+.idea/
+cursor/
+
+# Backup bundles and local snapshots
+_backup_codex/
+backend/app.backup./
+deploy/backups/
+deploy/tmp/
+*.tar.gz
+*.log
+*.pid
+*.bak
+*.bak-*
+*.tmp
+
+# Imported local notes
+docs/from-cal/memory.md
+
+# OS noise
+.DS_Store
+Thumbs.db
+._*

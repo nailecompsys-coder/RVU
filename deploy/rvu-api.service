@@ -1,0 +1,28 @@
+[Unit]
+Description=RVU API (FastAPI/uvicorn) — rvu.midfloridasurgical.com
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=dnaile748
+Group=dnaile748
+WorkingDirectory=/home/dnaile748/rvu/backend
+
+EnvironmentFile=/home/dnaile748/rvu/.env
+Environment=PYTHONPATH=/home/dnaile748/rvu/backend
+
+ExecStart=/home/dnaile748/rvu/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 3010 \
+    --workers 2
+
+Restart=always
+RestartSec=5
+
+# Logging goes to journald — view with: journalctl -u rvu-api -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rvu-api
+
+[Install]
+WantedBy=multi-user.target

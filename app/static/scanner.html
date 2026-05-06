@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>RVU Estimator</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+html,body{background:#f5f5f7;color:#1c1c1e;font-family:-apple-system,system-ui,sans-serif;font-size:15px;min-height:100dvh}
+body{padding:16px 16px 40px;max-width:680px;margin:0 auto}
+
+.hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;padding-bottom:12px;border-bottom:1px solid #d1d1d6}
+.hdr-title{font-size:17px;font-weight:700;display:flex;align-items:center;gap:8px}
+.beta{background:#ff6b001a;color:#ff6b00;font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px}
+.hdr-links{display:flex;align-items:center;gap:12px}
+.hdr-links a{font-size:12px;color:#007aff;text-decoration:none}
+.hdr-links a.logout{color:#8e8e93}
+
+.card{background:#fff;border:1px solid #d1d1d6;border-radius:12px;padding:14px 16px;margin-bottom:10px}
+.card-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#8e8e93;margin-bottom:10px}
+
+.cam{width:100%;height:110px;background:#f5f5f7;border:1.5px dashed #c7c7cc;border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;cursor:pointer;position:relative;overflow:hidden;transition:border-color .15s;margin-bottom:8px}
+.cam:active,.cam.busy{border-color:#007aff;background:#f0f5ff}
+.cam .ci{font-size:32px;line-height:1}
+.cam.busy .ci{animation:pulse 1s ease-in-out infinite}
+.cam .cl{font-size:13px;font-weight:600;color:#007aff}
+.cam .ch{font-size:11px;color:#8e8e93}
+#imgCamera,#imgFile{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+
+#pill{display:none;align-items:center;gap:8px;background:#fff;border:1px solid #e5e5ea;border-radius:20px;padding:6px 12px;font-size:12px;margin-bottom:8px;color:#3c3c43}
+#pill.show{display:flex}
+#pill.err{border-color:#ff3b3060;background:#fff5f5;color:#ff3b30}
+#pill.ok{border-color:#34c75960;background:#f5fff8;color:#1c7c38}
+.sp{width:12px;height:12px;border:2px solid #c7c7cc;border-top-color:#007aff;border-radius:50%;animation:spin .5s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+#elapsed{margin-left:auto;font-size:11px;color:#8e8e93;font-variant-numeric:tabular-nums}
+#thinkBox{display:none;background:#f5f5f7;border:1px solid #d1d1d6;border-radius:8px;padding:8px 10px;margin-bottom:8px;font-family:ui-monospace,monospace;font-size:10px;line-height:1.6;color:#3c3c43;max-height:90px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+#preview{width:100%;max-height:160px;object-fit:contain;border-radius:8px;border:1px solid #d1d1d6;margin-bottom:8px;display:none;background:#fff}
+
+.div-row{display:flex;align-items:center;gap:8px;color:#8e8e93;font-size:11px;margin:2px 0 8px}
+.div-row::before,.div-row::after{content:'';flex:1;height:1px;background:#d1d1d6}
+
+.file-btn{width:100%;background:#f5f5f7;border:1px solid #d1d1d6;border-radius:10px;padding:9px 12px;font-size:13px;color:#3c3c43;cursor:pointer;display:flex;align-items:center;gap:6px;position:relative;overflow:hidden;margin-bottom:8px}
+#imgFile2{position:absolute;inset:0;opacity:0;cursor:pointer}
+#fileLbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+label{display:block;font-size:11px;font-weight:600;color:#8e8e93;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+select,input[type="number"],textarea{width:100%;padding:9px 11px;border:1px solid #d1d1d6;border-radius:8px;background:#f5f5f7;color:#1c1c1e;font-size:14px;font-family:inherit;-webkit-appearance:none}
+select:focus,input[type="number"]:focus,textarea:focus{outline:none;border-color:#007aff;background:#fff}
+textarea{min-height:68px;resize:vertical;font-size:13px}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.field{margin-bottom:10px}
+
+.toggle-row{display:flex;gap:0;border:1px solid #d1d1d6;border-radius:8px;overflow:hidden;margin-bottom:10px}
+.toggle-row button{flex:1;padding:9px;background:#f5f5f7;border:none;font-size:13px;font-weight:600;color:#8e8e93;cursor:pointer;transition:all .15s}
+.toggle-row button.active{background:#007aff;color:#fff}
+
+.btn{display:flex;align-items:center;justify-content:center;gap:6px;padding:11px 16px;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer;width:100%;transition:opacity .1s}
+.btn:active{opacity:.75}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:#007aff;color:#fff}
+.btn-ghost{background:#fff;border:1px solid #d1d1d6;color:#3c3c43;font-size:13px;width:auto;padding:8px 14px}
+.btn-ghost.red{color:#ff3b30;border-color:#ff3b3040}
+
+details{background:#fff;border:1px solid #d1d1d6;border-radius:12px;margin-bottom:10px;overflow:hidden}
+details>summary{padding:12px 14px;font-size:13px;font-weight:600;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;color:#3c3c43}
+details>summary::after{content:'›';margin-left:auto;font-size:18px;color:#8e8e93;transform:rotate(90deg);display:inline-block;transition:transform .2s}
+details[open]>summary::after{transform:rotate(270deg)}
+details>.inner{padding:4px 14px 14px;border-top:1px solid #f2f2f7}
+
+#outPanel{display:none}
+.total-card{background:#fff;border:1px solid #d1d1d6;border-radius:12px;padding:14px 16px;margin-bottom:10px}
+.total-top{display:flex;align-items:flex-start;gap:12px}
+.total-num{font-size:30px;font-weight:800;color:#1c7c38;letter-spacing:-.5px}
+.total-sub{font-size:11px;color:#8e8e93;margin-top:2px}
+.badge{background:#007aff15;color:#007aff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px}
+.gpci-row{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid #f2f2f7}
+.gpci-cell{text-align:center}
+.gpci-val{font-size:15px;font-weight:700;color:#1c1c1e}
+.gpci-lbl{font-size:10px;color:#8e8e93;text-transform:uppercase;letter-spacing:.04em}
+
+/* Table — guardrails so it never overruns screen */
+.tbl-wrap{background:#fff;border:1px solid #d1d1d6;border-radius:12px;overflow:hidden;margin-bottom:10px;max-width:100%}
+.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:12px;min-width:520px;table-layout:auto}
+th{padding:7px 8px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#8e8e93;border-bottom:1px solid #f2f2f7;white-space:nowrap}
+td{padding:8px;border-bottom:1px solid #f2f2f7;color:#1c1c1e;vertical-align:top;word-break:break-word}
+td.nu{text-align:right;font-variant-numeric:tabular-nums;font-family:ui-monospace,monospace;white-space:nowrap}
+td.green{color:#1c7c38;font-weight:700}
+td.desc{font-size:11px;color:#8e8e93;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+tr.tot-row td{font-weight:700;border-top:2px solid #007aff;border-bottom:none;background:#f8faff}
+.result-actions{display:flex;gap:8px;margin-top:0;margin-left:auto}
+
+footer{margin-top:24px;font-size:10px;color:#aeaeb2;text-align:center;line-height:1.6}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div class="hdr-title">RVU Estimator <span class="beta">β 0.1</span></div>
+  <div class="hdr-links">
+    <a href="/history">History</a>
+    <form method="post" action="/logout" style="display:inline">
+      <button type="submit" style="background:none;border:none;cursor:pointer;font-size:12px;color:#8e8e93;padding:0">Logout</button>
+    </form>
+  </div>
+</div>
+
+<!-- CALC SETTINGS -->
+<div class="card">
+  <div class="card-title">Calculation Settings</div>
+  <div class="field">
+    <label>Medicare Locality</label>
+    <select id="locality"><option value="">Loading…</option></select>
+  </div>
+  <div class="field">
+    <label>Setting</label>
+    <div class="toggle-row">
+      <button id="btnNonFac" class="active" onclick="setFacility(false)">Non-Facility (Office)</button>
+      <button id="btnFac" onclick="setFacility(true)">Facility (Hospital / ASC)</button>
+    </div>
+  </div>
+  <div class="two-col">
+    <div class="field">
+      <label>Conv. Factor ($/RVU)</label>
+      <input type="number" id="cf" step="0.0001" value="32.3465">
+    </div>
+    <div class="field">
+      <label>Year</label>
+      <input type="text" id="rvu_year" value="2026" readonly style="color:#8e8e93">
+    </div>
+  </div>
+</div>
+
+<!-- CAMERA -->
+<div class="card">
+  <div class="card-title">Scan Epic Charge Screen</div>
+  <div class="cam" id="camHero">
+    <span class="ci" id="camIcon">📷</span>
+    <span class="cl" id="camLabel">Tap to scan</span>
+    <span class="ch" id="camHint">Point camera at Epic charges screen</span>
+    <input type="file" id="imgCamera" accept="image/*" capture="environment">
+  </div>
+  <div id="pill"><div class="sp" id="pillSp" style="display:none"></div><span id="pillTxt"></span><span id="elapsed"></span></div>
+  <div id="thinkBox"></div>
+  <img id="preview" alt="Photo">
+  <div class="div-row">or</div>
+  <div class="file-btn">📁 <span id="fileLbl">Choose existing photo or screenshot</span><input type="file" id="imgFile2" accept="image/*"></div>
+</div>
+
+<!-- PASTE TEXT -->
+<details>
+  <summary>✏️ Enter / paste CPT codes manually</summary>
+  <div class="inner">
+    <textarea id="raw" placeholder="Paste CPT codes or Epic charge text…"></textarea>
+    <div style="margin-top:8px"><button type="button" class="btn btn-primary" id="btnPaste">Extract CPTs</button></div>
+  </div>
+</details>
+
+<!-- RESULTS -->
+<div id="outPanel">
+  <div class="total-card">
+    <div class="total-top">
+      <div>
+        <div class="total-num" id="resultTotal">$0.00</div>
+        <div class="total-sub">
+          <span id="cptCount">0</span> CPT code(s) ·
+          <span id="localityLabel"></span> ·
+          <span id="settingLabel">Non-Facility</span>
+          &nbsp;<span id="aiModelBadge" class="badge" style="display:none"></span>
+        </div>
+      </div>
+      <div class="result-actions">
+        <button class="btn btn-ghost red" onclick="clearResults()">Clear</button>
+      </div>
+    </div>
+    <div class="gpci-row">
+      <div class="gpci-cell"><div class="gpci-val" id="gpciWork">—</div><div class="gpci-lbl">Work GPCI</div></div>
+      <div class="gpci-cell"><div class="gpci-val" id="gpciPE">—</div><div class="gpci-lbl">PE GPCI</div></div>
+      <div class="gpci-cell"><div class="gpci-val" id="gpciMP">—</div><div class="gpci-lbl">MP GPCI</div></div>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>CPT</th><th>Description</th>
+            <th class="nu">wRVU</th><th class="nu">PE RVU</th><th class="nu">MP RVU</th>
+            <th class="nu">Total RVU</th><th class="nu">Payment</th>
+          </tr>
+        </thead>
+        <tbody id="tb"></tbody>
+        <tfoot>
+          <tr class="tot-row">
+            <td colspan="5">Total</td>
+            <td class="nu" id="totRvu">0.00</td>
+            <td class="nu green" id="tot">$0.00</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div id="msg" style="font-size:12px;color:#8e8e93;margin-top:4px"></div>
+<footer>2026 CMS MPFS · Local AI only — nothing leaves your network · Illustrative, not a claim determination</footer>
+
+<script>
+const VISION_STREAM  = '/api/vision-stream';
+const TEXT_STREAM    = '/api/text-stream';
+const LOCALITIES_API = '/api/localities';
+
+let _facility = false;
+let _localities = [];
+let _lastRows = [];
+
+// ── Locality loader ──────────────────────────────────────────
+async function loadLocalities(){
+  try{
+    const r = await fetch(LOCALITIES_API, {credentials:'include'});
+    if(r.status===401){ window.location='/register'; return; }
+    const d = await r.json();
+    _localities = d.localities || [];
+    document.getElementById('cf').value = d.cf || 32.3465;
+    const sel = document.getElementById('locality');
+    sel.innerHTML = '';
+    _localities.forEach((loc, idx) => {
+      const o = document.createElement('option');
+      o.value = idx;
+      o.textContent = `${loc.state} — ${loc.locality_name}`;
+      sel.appendChild(o);
+    });
+    const flIdx = _localities.findIndex(l => l.state === 'FL');
+    if(flIdx >= 0) sel.value = flIdx;
+  } catch(e){ console.warn('localities failed', e); }
+}
+
+function setFacility(fac){
+  _facility = fac;
+  document.getElementById('btnFac').classList.toggle('active', fac);
+  document.getElementById('btnNonFac').classList.toggle('active', !fac);
+  document.getElementById('settingLabel').textContent = fac ? 'Facility' : 'Non-Facility';
+  if(_lastRows.length) recalcTable();
+}
+
+function getLocalityObj(){
+  const idx = parseInt(document.getElementById('locality').value) || 0;
+  return _localities[idx] || {pw_gpci:1, pe_gpci:1, mp_gpci:1, locality_name:'', locality_num:'00'};
+}
+function getCF(){ return Number(document.getElementById('cf').value) || 32.3465; }
+
+// ── Status pill ──────────────────────────────────────────────
+let _timer = null, _t0 = 0;
+function pillSet(msg, state='loading'){
+  const pill = document.getElementById('pill');
+  const sp   = document.getElementById('pillSp');
+  pill.className = 'pill show ' + (state==='err' ? 'err' : state==='ok' ? 'ok' : '');
+  document.getElementById('pillTxt').textContent = msg;
+  sp.style.display = state === 'loading' ? 'block' : 'none';
+  clearInterval(_timer);
+  if(state === 'loading'){
+    _t0 = Date.now();
+    _timer = setInterval(() => {
+      document.getElementById('elapsed').textContent = ((Date.now()-_t0)/1000).toFixed(0)+'s';
+    }, 500);
+    document.getElementById('elapsed').textContent = '0s';
+  } else {
+    document.getElementById('elapsed').textContent = '';
+  }
+}
+function pillHide(){ clearInterval(_timer); document.getElementById('pill').className = 'pill'; }
+function camBusy(b){
+  document.getElementById('camHero').classList.toggle('busy', b);
+  document.getElementById('camIcon').textContent = b ? '⏳' : '📷';
+  document.getElementById('camLabel').textContent = b ? 'Analyzing…' : 'Tap to scan';
+  document.getElementById('camHint').textContent  = b ? 'Sending to local AI…' : 'Point camera at Epic charges screen';
+}
+function thinkShow(){ const b=document.getElementById('thinkBox'); b.style.display='block'; b.textContent=''; }
+function thinkAppend(t){ const b=document.getElementById('thinkBox'); b.textContent+=t; b.scrollTop=b.scrollHeight; }
+function thinkHide(){ document.getElementById('thinkBox').style.display='none'; }
+
+function showPreview(file){
+  const p = document.getElementById('preview');
+  p.src = URL.createObjectURL(file);
+  p.style.display = 'block';
+}
+function clearResults(){
+  document.getElementById('outPanel').style.display = 'none';
+  document.getElementById('tb').innerHTML = '';
+  document.getElementById('preview').style.display = 'none';
+  document.getElementById('preview').src = '';
+  document.getElementById('imgCamera').value = '';
+  document.getElementById('imgFile2').value = '';
+  document.getElementById('fileLbl').textContent = 'Choose existing photo or screenshot';
+  document.getElementById('msg').innerHTML = '';
+  _lastRows = [];
+  thinkHide(); pillHide(); camBusy(false);
+}
+
+// ── Client-side image resize ─────────────────────────────────
+function resizeImage(file, maxDim=1024, quality=0.82){
+  return new Promise(resolve => {
+    const img = new window.Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const {naturalWidth:w, naturalHeight:h} = img;
+      const scale = Math.min(1, maxDim / Math.max(w, h));
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(blob => resolve(blob), 'image/jpeg', quality);
+    };
+    img.src = url;
+  });
+}
+
+// ── Recalc client-side from stored rows ─────────────────────
+function recalcTable(){
+  if(!_lastRows.length) return;
+  const cf  = getCF();
+  const loc = getLocalityObj();
+  const rows = _lastRows.map(r => {
+    const pe = _facility ? (r.pe_fac_rvu||0) : (r.pe_nonfac_rvu||0);
+    const totalRvu = (r.work_rvu||0)*loc.pw_gpci + pe*loc.pe_gpci + (r.mp_rvu||0)*loc.mp_gpci;
+    return {...r, pe_rvu:pe, total_rvu:totalRvu, payment:totalRvu*cf};
+  });
+
+  const tb = document.getElementById('tb');
+  tb.innerHTML = '';
+  let sumPay=0, sumRvu=0;
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${r.CPT||r.cpt||''}</strong></td>
+      <td class="desc" title="${r.desc||''}">${r.desc||'—'}</td>
+      <td class="nu">${(r.work_rvu||0).toFixed(2)}</td>
+      <td class="nu">${(r.pe_rvu||0).toFixed(2)}</td>
+      <td class="nu">${(r.mp_rvu||0).toFixed(2)}</td>
+      <td class="nu">${(r.total_rvu||0).toFixed(2)}</td>
+      <td class="nu green">$${(r.payment||0).toFixed(2)}</td>`;
+    tb.appendChild(tr);
+    sumPay += r.payment; sumRvu += r.total_rvu;
+  });
+  document.getElementById('cptCount').textContent    = rows.length;
+  document.getElementById('tot').textContent         = '$'+sumPay.toFixed(2);
+  document.getElementById('totRvu').textContent      = sumRvu.toFixed(2);
+  document.getElementById('resultTotal').textContent = '$'+sumPay.toFixed(2);
+  document.getElementById('gpciWork').textContent    = loc.pw_gpci.toFixed(3);
+  document.getElementById('gpciPE').textContent      = loc.pe_gpci.toFixed(3);
+  document.getElementById('gpciMP').textContent      = loc.mp_gpci.toFixed(3);
+  document.getElementById('localityLabel').textContent = loc.locality_name || '';
+  document.getElementById('settingLabel').textContent  = _facility ? 'Facility' : 'Non-Facility';
+}
+
+// ── Render from AI result ────────────────────────────────────
+function renderTable(rows, model){
+  _lastRows = rows;
+  const b = document.getElementById('aiModelBadge');
+  if(model){ b.textContent=model; b.style.display='inline'; } else { b.style.display='none'; }
+  recalcTable();
+  document.getElementById('outPanel').style.display = 'block';
+  document.getElementById('outPanel').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+// ── SSE stream reader ────────────────────────────────────────
+async function readStream(url, body, onStatus, onToken, onDone, onError){
+  const isForm = body instanceof FormData;
+  const resp = await fetch(url, {
+    method:'POST', credentials:'include',
+    body: isForm ? body : JSON.stringify(body),
+    headers: isForm ? {} : {'Content-Type':'application/json'},
+  });
+  if(resp.status === 401){ window.location='/register'; return; }
+  if(!resp.ok){ onError(await resp.text()); return; }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while(true){
+    const {done, value} = await reader.read();
+    if(done) break;
+    buf += dec.decode(value, {stream:true});
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    let evt='', dataStr='';
+    for(const line of lines){
+      if(line.startsWith('event: '))     evt     = line.slice(7).trim();
+      else if(line.startsWith('data: ')) dataStr = line.slice(6).trim();
+      else if(line === '' && dataStr){
+        try{
+          const d = JSON.parse(dataStr);
+          if(evt==='status')     onStatus(d.msg);
+          else if(evt==='token') onToken(d.t);
+          else if(evt==='done')  onDone(d);
+          else if(evt==='error') onError(d.msg);
+        }catch(e){}
+        evt=''; dataStr='';
+      }
+    }
+  }
+}
+
+// ── Vision ───────────────────────────────────────────────────
+async function sendImageToVision(file){
+  showPreview(file); camBusy(true); thinkShow();
+  pillSet('Resizing image…');
+  const small = await resizeImage(file);
+  pillSet(`Uploading ${Math.round(small.size/1024)} KB to AI…`);
+  const form = new FormData();
+  form.append('image', small, 'photo.jpg');
+  const loc = getLocalityObj();
+  form.append('locality', loc.locality_num || '00');
+  form.append('facility', _facility ? 'true' : 'false');
+  form.append('cf', getCF());
+  await readStream(VISION_STREAM, form,
+    msg => pillSet(msg),
+    t   => thinkAppend(t),
+    d   => {
+      thinkHide();
+      const t = ((Date.now()-_t0)/1000).toFixed(1);
+      if(!(d.rows||[]).length){ pillSet('No CPT codes found — try a clearer photo', 'err'); }
+      else{ pillSet(`${d.cpts.length} CPT code(s) in ${t}s`, 'ok'); renderTable(d.rows, d.ai_model||''); }
+    },
+    msg => { thinkHide(); pillSet(msg, 'err'); }
+  );
+  camBusy(false);
+}
+
+document.getElementById('imgCamera').addEventListener('change', function(){
+  const f = this.files[0]; if(f) sendImageToVision(f);
+});
+document.getElementById('imgFile2').addEventListener('change', function(){
+  const f = this.files[0]; if(!f) return;
+  document.getElementById('fileLbl').textContent = f.name;
+  sendImageToVision(f);
+});
+
+// ── Text extract ─────────────────────────────────────────────
+document.getElementById('btnPaste').onclick = async function(){
+  const text = document.getElementById('raw').value || '';
+  if(!text.trim()){ pillSet('Paste some text first', 'err'); return; }
+  const btn = this; btn.disabled=true; btn.textContent='Extracting…';
+  thinkShow(); pillSet('Sending to local AI…');
+  await readStream(TEXT_STREAM,
+    {raw_text:text, locality:getLocalityObj().locality_num||'00', facility:_facility, cf:getCF()},
+    msg => pillSet(msg),
+    t   => thinkAppend(t),
+    d   => {
+      thinkHide();
+      const t = ((Date.now()-_t0)/1000).toFixed(1);
+      if(!(d.rows||[]).length){ pillSet('No CPT codes found', 'err'); }
+      else{ pillSet(`${d.cpts.length} CPT code(s) in ${t}s`, 'ok'); renderTable(d.rows, d.ai_model||''); }
+    },
+    msg => { thinkHide(); pillSet(msg, 'err'); }
+  );
+  btn.disabled=false; btn.textContent='Extract CPTs';
+};
+
+// ── Live recalc on setting changes ──────────────────────────
+document.getElementById('cf').addEventListener('input',      () => { if(_lastRows.length) recalcTable(); });
+document.getElementById('locality').addEventListener('change', () => { if(_lastRows.length) recalcTable(); });
+
+// ── Boot ─────────────────────────────────────────────────────
+loadLocalities();
+</script>
+</body>
+</html>
