@@ -14,9 +14,17 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   exit 1
 fi
 
-set -a
-source "${ENV_FILE}"
-set +a
+while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+  line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+  [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+  key="${line%%=*}"
+  value="${line#*=}"
+  key="${key%"${key##*[![:space:]]}"}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  if [[ -n "$key" ]]; then
+    export "$key=$value"
+  fi
+done < "${ENV_FILE}"
 
 if [[ -z "${DATABASE_URL:-}" ]]; then
   echo "DATABASE_URL is not set in ${ENV_FILE}"
