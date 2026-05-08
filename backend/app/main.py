@@ -40,15 +40,23 @@ def _ensure_rvu_schema() -> None:
     columns = {col["name"] for col in inspector.get_columns("rvu_scans")}
     with engine.begin() as conn:
         if "patient_name" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN patient_name VARCHAR(255)"))
+            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS patient_name VARCHAR(255)"))
         if "scan_status" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN scan_status VARCHAR(32) DEFAULT 'verified'"))
+            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS scan_status VARCHAR(32) DEFAULT 'verified'"))
         if "main_cpt" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN main_cpt VARCHAR(32)"))
+            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS main_cpt VARCHAR(32)"))
         if "main_cpt_status" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN main_cpt_status VARCHAR(16)"))
+            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS main_cpt_status VARCHAR(16)"))
         if "review_reason" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN review_reason VARCHAR(255)"))
+            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS review_reason VARCHAR(255)"))
+        if "client_request_id" not in columns:
+            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS client_request_id VARCHAR(128)"))
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_rvu_scans_surgeon_request_id "
+                "ON rvu_scans (surgeon_id, client_request_id)"
+            )
+        )
         conn.execute(text("UPDATE rvu_scans SET scan_status = 'verified' WHERE scan_status IS NULL"))
 
 

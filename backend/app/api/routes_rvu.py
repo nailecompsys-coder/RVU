@@ -8,6 +8,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 import logging
 from collections.abc import Callable
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from typing import Optional
@@ -42,6 +43,7 @@ APP_CF_DEFAULT = float(os.environ.get("RVU_DEFAULT_CF", "41.0"))
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("rvu.scan")
 SUPPORT_EMAIL = os.environ.get("RVU_SUPPORT_EMAIL", "support@midfloridasurgical.com")
+APP_TIME_ZONE = ZoneInfo("America/New_York")
 
 
 def _exception_client_message(exc: BaseException, *, max_len: int = 500) -> str:
@@ -80,6 +82,37 @@ def _format_hh_mm(value: datetime | str | None) -> str | None:
     else:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return dt.strftime("%H:%M")
+
+
+def _coerce_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _iso_utc(value: datetime | None) -> str | None:
+    dt = _coerce_utc(value)
+    return dt.isoformat() if dt else None
+
+
+def _iso_et(value: datetime | None) -> str | None:
+    dt = _coerce_utc(value)
+    return dt.astimezone(APP_TIME_ZONE).isoformat() if dt else None
+
+
+def _label_et(value: datetime | None) -> str | None:
+    dt = _coerce_utc(value)
+    if not dt:
+        return None
+    return dt.astimezone(APP_TIME_ZONE).strftime("%m/%d/%Y %I:%M %p %Z")
+
+
+def _elapsed_label(elapsed_secs: float | None) -> str | None:
+    if elapsed_secs is None:
+        return None
+    return f"{float(elapsed_secs):.1f}s OCR"
 
 
 def _effective_scan_date(scan: RvuScan) -> date | None:
@@ -152,6 +185,63 @@ def _touch_review_reason(scan: RvuScan) -> None:
     scan.review_reason = _get_scan_review_reason(scan)
 
 
+def _scan_status_label(scan: RvuScan) -> str:
+    status = (scan.scan_status or "verified").strip().lower()
+    if status == "verified":
+        return "Saved"
+    if status == "pending_review":
+        return "Saved, needs review"
+    if status == "pending_processing":
+        return "Processing"
+    return status.replace("_", " ").title()
+
+
+def _parse_cpts_json(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+def _saved_scan_payload(scan: RvuScan) -> dict[str, object]:
+    lines = _parse_line_items(scan.line_items)
+    primary_lines = _primary_line_items(lines)
+    return {
+        "cpts": _parse_cpts_json(scan.cpts),
+        "service_date": scan.service_date.isoformat() if scan.service_date else None,
+        "patient_name": scan.patient_name,
+        "mrn": scan.mrn,
+        "lines": lines,
+        "rows": primary_lines if primary_lines else lines,
+        "total_payment": round(float(scan.total_payment or 0.0), 2),
+        "ai_model": scan.ai_model,
+        "doc_type_guess": "charge_sheet",
+    }
+
+
+def _sanitize_client_request_id(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw or raw == "-":
+        return None
+    return raw[:128]
+
+
+def _find_existing_request_scan(db: Session, surgeon_id: int, request_id: str | None) -> RvuScan | None:
+    if not request_id:
+        return None
+    return (
+        db.query(RvuScan)
+        .filter(RvuScan.surgeon_id == surgeon_id, RvuScan.client_request_id == request_id)
+        .order_by(desc(RvuScan.scanned_at))
+        .first()
+    )
+
+
 def _get_or_create_user_settings(db: Session, surgeon_id: int) -> RvuUserSettings:
     row = db.query(RvuUserSettings).filter(RvuUserSettings.surgeon_id == surgeon_id).first()
     if row:
@@ -200,6 +290,10 @@ def _entry_row_dict(scan: RvuScan, surgeon: Surgeon | None = None) -> dict[str, 
         "wrvu": _scan_wrvu(scan),
         "review_reason": _get_scan_review_reason(scan),
         "setting_label": "Facility" if bool(scan.facility) else "Non-Facility",
+        "status_label": _scan_status_label(scan),
+        "scanned_at_et": _iso_et(scan.scanned_at),
+        "scanned_at_label": _label_et(scan.scanned_at),
+        "ocr_elapsed_label": _elapsed_label(scan.elapsed_secs),
     }
 
 
@@ -549,6 +643,7 @@ def _create_pending_scan_stub(
     cf: float,
     image_kb: int,
     image_bytes: bytes | None = None,
+    client_request_id: str | None = None,
 ) -> RvuScan:
     return payment_svc.save_scan(
         db,
@@ -569,6 +664,7 @@ def _create_pending_scan_stub(
         main_cpt=None,
         main_cpt_status=None,
         review_reason="Processing charge capture",
+        client_request_id=client_request_id,
     )
 
 
@@ -641,6 +737,7 @@ def _persist_capture_result(
     image_kb: int,
     elapsed: float,
     image_bytes: bytes | None = None,
+    client_request_id: str | None = None,
 ) -> RvuScan:
     rows = payload["rows"]
     total = payload["total_payment"]
@@ -678,6 +775,7 @@ def _persist_capture_result(
             mrn=cap.get("mrn"),
             service_date=payment_svc.parse_service_date(cap.get("service_date")),
         ),
+        client_request_id=client_request_id,
     )
     _maybe_fanout_charge_capture_for_other_surgeons(db, scan=scan, cap_lines=cap.get("lines") if isinstance(cap.get("lines"), list) else None)
     return scan
@@ -703,9 +801,15 @@ def _finalize_capture_response(
         response["id"] = scan.id
         response["patient_name"] = scan.patient_name
         response["scan_status"] = scan.scan_status
+        response["status_label"] = _scan_status_label(scan)
         response["main_cpt"] = scan.main_cpt
         response["main_cpt_status"] = scan.main_cpt_status
         response["has_image"] = _stored_binary_usable(scan.image_data)
+        response["scanned_at"] = _iso_utc(scan.scanned_at)
+        response["scanned_at_et"] = _iso_et(scan.scanned_at)
+        response["scanned_at_label"] = _label_et(scan.scanned_at)
+        response["review_reason"] = _get_scan_review_reason(scan)
+    response["ocr_elapsed_label"] = _elapsed_label(response.get("elapsed_secs"))
     if include_staff and surgeon is not None:
         response["surgeon_name"] = getattr(surgeon, "full_name", None)
         response["staff_type"] = getattr(surgeon, "staff_type", None)
@@ -1185,10 +1289,33 @@ def text_stream(
     body: TextScanBody,
     db: Session = Depends(get_db),
     auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
     surgeon, _ = auth
+    do_persist = body.persist
+    client_request_id = _sanitize_client_request_id(rvu_request_id)
 
     def generate():
+        if do_persist and client_request_id:
+            existing_scan = _find_existing_request_scan(db, surgeon.id, client_request_id)
+            if existing_scan is not None:
+                log.info(
+                    "[b09ef5] text_stream_reused req_id=%s surgeon_id=%s scan_id=%s status=%s",
+                    client_request_id[:64],
+                    surgeon.id,
+                    existing_scan.id,
+                    existing_scan.scan_status,
+                )
+                response = _finalize_capture_response(
+                    payload=_saved_scan_payload(existing_scan),
+                    locality=existing_scan.locality_num or body.locality,
+                    elapsed=float(existing_scan.elapsed_secs or 0.0),
+                    persisted=True,
+                    scan=existing_scan,
+                )
+                response["idempotency_reused"] = True
+                yield _sse("done", response)
+                return
         events: list[tuple[str, str]] = []
         try:
             cap, payload, elapsed, ai_model = _run_text_capture(
@@ -1209,7 +1336,7 @@ def text_stream(
             key = "t" if kind == "token" else "msg"
             yield _sse(kind, {key: msg})
         if body.persist and payload["cpts"]:
-            _persist_capture_result(
+            saved = _persist_capture_result(
                 db=db,
                 surgeon=surgeon,
                 payload=payload,
@@ -1220,7 +1347,10 @@ def text_stream(
                 ai_model=ai_model,
                 image_kb=0,
                 elapsed=elapsed,
+                client_request_id=client_request_id,
             )
+        else:
+            saved = None
         yield _sse(
             "done",
             _finalize_capture_response(
@@ -1228,6 +1358,7 @@ def text_stream(
                 locality=body.locality,
                 elapsed=elapsed,
                 persisted=bool(body.persist and payload["cpts"]),
+                scan=saved,
             ),
         )
 
@@ -1242,9 +1373,31 @@ def text_scan(
     body: TextScanBody,
     db: Session = Depends(get_db),
     auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
     """Non-streaming JSON endpoint for native app; same logic as text-stream."""
     surgeon, _ = auth
+    do_persist = body.persist
+    client_request_id = _sanitize_client_request_id(rvu_request_id)
+    if do_persist and client_request_id:
+        existing_scan = _find_existing_request_scan(db, surgeon.id, client_request_id)
+        if existing_scan is not None:
+            log.info(
+                "[b09ef5] text_scan_reused req_id=%s surgeon_id=%s scan_id=%s status=%s",
+                client_request_id[:64],
+                surgeon.id,
+                existing_scan.id,
+                existing_scan.scan_status,
+            )
+            response = _finalize_capture_response(
+                payload=_saved_scan_payload(existing_scan),
+                locality=existing_scan.locality_num or body.locality,
+                elapsed=float(existing_scan.elapsed_secs or 0.0),
+                persisted=True,
+                scan=existing_scan,
+            )
+            response["idempotency_reused"] = True
+            return response
     cap, payload, elapsed, ai_model = _run_text_capture(
         body.raw_text,
         db=db,
@@ -1265,6 +1418,7 @@ def text_scan(
             ai_model=ai_model,
             image_kb=0,
             elapsed=elapsed,
+            client_request_id=client_request_id,
         )
     return _finalize_capture_response(
         payload=payload,
@@ -1291,11 +1445,33 @@ async def vision_scan(
 ):
     """Non-streaming JSON endpoint for native app; same logic as vision-stream."""
     surgeon, _ = auth
-    image_bytes, orig_kb, small_kb = _prepare_uploaded_image(await image.read())
     fac = facility.lower() == "true"
     do_persist = persist.lower() == "true"
+    client_request_id = _sanitize_client_request_id(rvu_request_id)
+    if do_persist and client_request_id:
+        existing_scan = _find_existing_request_scan(db, surgeon.id, client_request_id)
+        if existing_scan is not None:
+            log.info(
+                "[b09ef5] vision_scan_reused req_id=%s surgeon_id=%s scan_id=%s status=%s",
+                client_request_id[:64],
+                surgeon.id,
+                existing_scan.id,
+                existing_scan.scan_status,
+            )
+            response = _finalize_capture_response(
+                payload=_saved_scan_payload(existing_scan),
+                locality=existing_scan.locality_num or locality,
+                elapsed=float(existing_scan.elapsed_secs or 0.0),
+                persisted=True,
+                scan=existing_scan,
+                surgeon=surgeon,
+                include_staff=True,
+            )
+            response["idempotency_reused"] = True
+            return response
+    image_bytes, orig_kb, small_kb = _prepare_uploaded_image(await image.read())
     wall_start_s = time.monotonic()
-    _rid = (rvu_request_id or "-")[:64]
+    _rid = (client_request_id or "-")[:64]
     log.info(
         "[b09ef5] vision_scan_begin req_id=%s surgeon_id=%s orig_kb=%s small_kb=%s mode=%s persist=%s",
         _rid,
@@ -1315,6 +1491,7 @@ async def vision_scan(
             cf=cf,
             image_kb=small_kb,
             image_bytes=image_bytes,
+            client_request_id=client_request_id,
         )
     t_started = datetime.now(timezone.utc)
     try:
@@ -1449,7 +1626,7 @@ async def reconciliation_draft(
     surgeon, _ = auth
     image_bytes, _orig_kb, _small_kb = _prepare_uploaded_image(await image.read())
     fac = facility.lower() == "true"
-    cap, _payload, elapsed, _vision_backend, _mode = _run_vision_capture(
+    cap, _payload, elapsed, vision_backend, _mode = _run_vision_capture(
         image_bytes,
         db=db,
         locality=locality,
@@ -1463,7 +1640,7 @@ async def reconciliation_draft(
     return _build_reconciliation_draft(
         cap=cap,
         surgeon=surgeon,
-        provider=provider,
+        provider=str(vision_backend or "unknown"),
         elapsed=elapsed,
         locality=locality,
         facility=fac,
@@ -1483,12 +1660,45 @@ async def vision_stream(
     service_date: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
     surgeon, _ = auth
-    image_bytes, orig_kb, small_kb = _prepare_uploaded_image(await image.read())
     fac = facility.lower() == "true"
     do_persist = persist.lower() == "true"
+    client_request_id = _sanitize_client_request_id(rvu_request_id)
     mode = (scan_mode or "balanced").strip().lower()
+
+    if do_persist and client_request_id:
+        existing_scan = _find_existing_request_scan(db, surgeon.id, client_request_id)
+        if existing_scan is not None:
+            log.info(
+                "[b09ef5] vision_stream_reused req_id=%s surgeon_id=%s scan_id=%s status=%s",
+                client_request_id[:64],
+                surgeon.id,
+                existing_scan.id,
+                existing_scan.scan_status,
+            )
+
+            def generate_reuse():
+                response = _finalize_capture_response(
+                    payload=_saved_scan_payload(existing_scan),
+                    locality=existing_scan.locality_num or locality,
+                    elapsed=float(existing_scan.elapsed_secs or 0.0),
+                    persisted=True,
+                    scan=existing_scan,
+                    surgeon=surgeon,
+                    include_staff=True,
+                )
+                response["idempotency_reused"] = True
+                yield _sse("done", response)
+
+            return StreamingResponse(
+                generate_reuse(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+    image_bytes, orig_kb, small_kb = _prepare_uploaded_image(await image.read())
     log.info("vision_stream start mode=%s image_kb=%s", mode, small_kb)
 
     def generate():
@@ -1525,8 +1735,9 @@ async def vision_stream(
             len(payload.get("cpts") or []),
             len((cap.get("lines") or [])),
         )
+        saved_scan = None
         if do_persist:
-            _persist_capture_result(
+            saved_scan = _persist_capture_result(
                 db=db,
                 surgeon=surgeon,
                 payload=payload,
@@ -1538,6 +1749,7 @@ async def vision_stream(
                 image_kb=small_kb,
                 elapsed=elapsed,
                 image_bytes=image_bytes,
+                client_request_id=client_request_id,
             )
         yield _sse(
             "done",
@@ -1546,6 +1758,9 @@ async def vision_stream(
                 locality=locality,
                 elapsed=elapsed,
                 persisted=bool(do_persist),
+                scan=saved_scan,
+                surgeon=surgeon,
+                include_staff=True,
             ),
         )
 
@@ -1559,7 +1774,9 @@ def _scan_history_dict(s: RvuScan, surgeon: "Surgeon | None" = None) -> dict:
     line_parsed = _parse_line_items(s.line_items)
     return {
         "id": s.id,
-        "scanned_at": s.scanned_at.isoformat() if s.scanned_at else None,
+        "scanned_at": _iso_utc(s.scanned_at),
+        "scanned_at_et": _iso_et(s.scanned_at),
+        "scanned_at_label": _label_et(s.scanned_at),
         "service_date": s.service_date.isoformat() if s.service_date else None,
         "patient_name": s.patient_name,
         "mrn": s.mrn,
@@ -1574,11 +1791,13 @@ def _scan_history_dict(s: RvuScan, surgeon: "Surgeon | None" = None) -> dict:
         "ai_model": s.ai_model,
         "has_image": _stored_binary_usable(s.image_data),
         "scan_status": s.scan_status or "verified",
+        "status_label": _scan_status_label(s),
         "main_cpt": s.main_cpt,
         "main_cpt_status": s.main_cpt_status,
         "surgeon_name": getattr(surgeon, "full_name", None) if surgeon else None,
         "staff_type": getattr(surgeon, "staff_type", None) if surgeon else None,
         "elapsed_secs": s.elapsed_secs,
+        "ocr_elapsed_label": _elapsed_label(s.elapsed_secs),
         "review_reason": _get_scan_review_reason(s),
     }
 

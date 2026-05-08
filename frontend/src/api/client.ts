@@ -314,16 +314,32 @@ export type CaptureLine = {
 export type ScanRow = {
   id: number;
   scanned_at: string | null;
+  /** ISO UTC instant from API (preferred when present) */
+  scanned_at_et?: string | null;
+  scanned_at_label?: string | null;
   service_date?: string | null;
+  patient_name?: string | null;
   mrn?: string | null;
   line_items?: unknown;
+  /** Legacy JSON string of CPT list from API; parsed LineItem[] in UI */
+  cpts?: unknown;
   total_rvu: number;
   total_payment: number;
   cf?: number;
+  locality_num?: string | null;
   locality_name: string | null;
   facility: boolean;
   ai_model: string | null;
   has_image?: boolean;
+  scan_status?: string | null;
+  status_label?: string | null;
+  main_cpt?: string | null;
+  main_cpt_status?: string | null;
+  review_reason?: string | null;
+  elapsed_secs?: number | null;
+  ocr_elapsed_label?: string | null;
+  surgeon_name?: string | null;
+  staff_type?: string | null;
 };
 
 export type PortalScanRow = ScanRow & {

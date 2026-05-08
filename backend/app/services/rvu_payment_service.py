@@ -339,6 +339,7 @@ class RvuPaymentService:
         main_cpt: str | None = None,
         main_cpt_status: str | None = None,
         review_reason: str | None = None,
+        client_request_id: str | None = None,
     ) -> RvuScan:
         scan = RvuScan(
             surgeon_id=surgeon_id,
@@ -362,6 +363,7 @@ class RvuPaymentService:
             main_cpt=(main_cpt[:32] if main_cpt else None),
             main_cpt_status=(main_cpt_status[:16] if main_cpt_status else None),
             review_reason=(review_reason[:255] if review_reason else None),
+            client_request_id=(client_request_id[:128] if client_request_id else None),
         )
         db.add(scan)
         db.commit()

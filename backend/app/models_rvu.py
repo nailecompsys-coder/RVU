@@ -19,6 +19,7 @@ class RvuScan(Base):
     __table_args__ = (
         Index("ix_rvu_scans_surgeon_service_date", "surgeon_id", "service_date"),
         Index("ix_rvu_scans_surgeon_scan_status", "surgeon_id", "scan_status"),
+        Index("ix_rvu_scans_surgeon_request_id", "surgeon_id", "client_request_id"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -43,6 +44,7 @@ class RvuScan(Base):
     main_cpt = Column(String(32), nullable=True)
     main_cpt_status = Column(String(16), nullable=True)
     review_reason = Column(String(255), nullable=True)
+    client_request_id = Column(String(128), nullable=True)
 
     surgeon = relationship("Surgeon")
 
