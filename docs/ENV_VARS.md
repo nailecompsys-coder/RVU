@@ -33,6 +33,12 @@ This is the canonical env contract for RVU across local and production.
 |---|---|---|
 | `RVU_LOCK_LOCAL_ONLY` | `true` | Limit local behavior as configured by app |
 | `RVU_DEFAULT_CF` | `41.0` | Conversion factor fallback |
+| `RVU_BUILD_ID` | _(unset)_ | Optional deploy label exposed in `GET /api/version` (build number, image tag, etc.) |
+
+## Version endpoint
+
+- `GET /api/version` returns app version, optional `RVU_BUILD_ID`, git commit when `.git` is present, and `frontend/package.json` version.
+- Probe from the host: `scripts/rvu_version_simulator.sh` or `curl -s http://127.0.0.1:3010/api/version`.
 
 ## Email feature variables
 

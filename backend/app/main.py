@@ -1,5 +1,5 @@
 """
-RVU standalone API — shares DATABASE_URL with the practice app (surgeons, admin_users, scans).
+RVU standalone API — runs against the RVU-owned database boundary for identity and scan data.
 Run from `backend/`:  uvicorn app.main:app --host 0.0.0.0 --port 3010
 """
 import os
@@ -20,12 +20,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
 
-# Register shared practice ORM + RVU models (same PostgreSQL schema)
-from app import cal_models  # noqa: F401
+# Register RVU-owned identity ORM + RVU business models
+from app import models_identity  # noqa: F401
 from app import models_rvu  # noqa: F401
 from app.api.routes_auth import router as auth_router
 from app.api.routes_rvu import portal_router, router as rvu_router
-from app.database import Base, SessionLocal, engine
+from app.database import Base, engine
+from app.version_info import version_payload
 
 # Dev: repo root `frontend/dist`. Docker: set RVU_STATIC_DIST=/app/frontend/dist
 _DIST = os.environ.get("RVU_STATIC_DIST") or os.path.abspath(
@@ -87,6 +88,12 @@ app.include_router(portal_router)
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "rvu"}
+
+
+@app.get("/api/version")
+def api_version():
+    """Deploy/git/app metadata for native clients, support, and scripts (no auth)."""
+    return version_payload()
 
 
 if os.path.isdir(_DIST):

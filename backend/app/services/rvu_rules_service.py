@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.cal_models import SchedulingRuleConfig
+from app.models_identity import RvuRuleConfig
 from app.rvu.lookup import (
     DEFAULT_MODIFIER_DESC,
     DEFAULT_MODIFIER_FACTORS,
@@ -39,7 +39,7 @@ def _general_surgery_focus_cpts() -> set[str]:
 
 
 def _load_rule_config(db: Session, rule_id: str) -> dict[str, Any]:
-    row = db.query(SchedulingRuleConfig).filter(SchedulingRuleConfig.rule_id == rule_id).first()
+    row = db.query(RvuRuleConfig).filter(RvuRuleConfig.rule_id == rule_id).first()
     if not row or not row.config:
         return {}
     try:
@@ -50,9 +50,9 @@ def _load_rule_config(db: Session, rule_id: str) -> dict[str, Any]:
 
 
 def _save_rule_config(db: Session, rule_id: str, payload: dict[str, Any]) -> None:
-    row = db.query(SchedulingRuleConfig).filter(SchedulingRuleConfig.rule_id == rule_id).first()
+    row = db.query(RvuRuleConfig).filter(RvuRuleConfig.rule_id == rule_id).first()
     if not row:
-        row = SchedulingRuleConfig(rule_id=rule_id, enabled=True, config="{}")
+        row = RvuRuleConfig(rule_id=rule_id, enabled=True, config="{}")
         db.add(row)
     row.enabled = True
     row.config = json.dumps(payload, sort_keys=True)

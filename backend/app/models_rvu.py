@@ -23,7 +23,7 @@ class RvuScan(Base):
     )
 
     id = Column(Integer, primary_key=True)
-    surgeon_id = Column(Integer, ForeignKey("surgeons.id"), nullable=False)
+    surgeon_id = Column(Integer, ForeignKey("rvu_staff.id"), nullable=False)
     scanned_at = Column(DateTime, server_default=func.now())
     cpts = Column(Text)
     locality_num = Column(String(10))
@@ -46,14 +46,14 @@ class RvuScan(Base):
     review_reason = Column(String(255), nullable=True)
     client_request_id = Column(String(128), nullable=True)
 
-    surgeon = relationship("Surgeon")
+    surgeon = relationship("RvuStaff")
 
 
 class RvuUserSettings(Base):
     __tablename__ = "rvu_user_settings"
 
     id = Column(Integer, primary_key=True)
-    surgeon_id = Column(Integer, ForeignKey("surgeons.id"), nullable=False, unique=True)
+    surgeon_id = Column(Integer, ForeignKey("rvu_staff.id"), nullable=False, unique=True)
     default_facility = Column(Boolean, nullable=False, default=True)
     cms_locality_num = Column(String(10), nullable=False, default="99")
     cf = Column(Float, nullable=False, default=41.0)
@@ -61,7 +61,7 @@ class RvuUserSettings(Base):
     auto_suggest_from_scan = Column(Boolean, nullable=False, default=True)
     cloud_sync_enabled = Column(Boolean, nullable=False, default=True)
 
-    surgeon = relationship("Surgeon")
+    surgeon = relationship("RvuStaff")
 
 
 class RvuOpNote(Base):
@@ -70,7 +70,7 @@ class RvuOpNote(Base):
     __tablename__ = "rvu_op_notes"
 
     id = Column(Integer, primary_key=True)
-    surgeon_id = Column(Integer, ForeignKey("surgeons.id"), nullable=False)
+    surgeon_id = Column(Integer, ForeignKey("rvu_staff.id"), nullable=False)
     scanned_at = Column(DateTime, server_default=func.now())
     image_data = Column(LargeBinary, nullable=True)
     image_kb = Column(Integer, default=0)
@@ -78,4 +78,4 @@ class RvuOpNote(Base):
     ai_model = Column(String(64), nullable=True)
     elapsed_secs = Column(Float, nullable=True)
 
-    surgeon = relationship("Surgeon")
+    surgeon = relationship("RvuStaff")

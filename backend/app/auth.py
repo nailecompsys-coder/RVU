@@ -10,9 +10,9 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.cal_models import AdminUser, MagicLink, Surgeon, SurgeonDevice
+from app.models_identity import RvuAdminUser, RvuMagicLink, RvuStaff, RvuStaffDevice
 
-SECRET_KEY = os.environ["SECRET_KEY"]
+SECRET_KEY = os.environ.get("RVU_SECRET_KEY") or os.environ["SECRET_KEY"]
 ALGORITHM = "HS256"
 ADMIN_TOKEN_EXPIRE_HOURS = 12
 SURGEON_TOKEN_EXPIRE_DAYS = 365  # device tokens are long-lived
@@ -42,7 +42,7 @@ def get_current_admin(
     request: Request,
     admin_token: str | None = Cookie(default=None),
     db: Session = Depends(get_db),
-) -> AdminUser:
+) -> RvuAdminUser:
     token = admin_token or request.cookies.get("admin_token")
     if not token:
         raise HTTPException(status_code=302, headers={"Location": "/admin/login"})
@@ -53,7 +53,7 @@ def get_current_admin(
         admin_id = int(payload["sub"])
     except (JWTError, ValueError):
         raise HTTPException(status_code=302, headers={"Location": "/admin/login"})
-    admin = db.get(AdminUser, admin_id)
+    admin = db.get(RvuAdminUser, admin_id)
     if not admin or not admin.is_active:
         raise HTTPException(status_code=302, headers={"Location": "/admin/login"})
     return admin
@@ -61,19 +61,19 @@ def get_current_admin(
 
 # ── Magic Link ───────────────────────────────────────────────────────────────
 
-def generate_magic_link_token(surgeon_id: int, db: Session, base_url: str) -> str:
+def generate_magic_link_token(staff_id: int, db: Session, base_url: str) -> str:
     """Creates a magic link record and returns the full URL."""
     raw_token = secrets.token_urlsafe(48)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=MAGIC_LINK_EXPIRE_HOURS)
 
-    link = MagicLink(surgeon_id=surgeon_id, token_hash=token_hash, expires_at=expires_at)
+    link = RvuMagicLink(staff_id=staff_id, token_hash=token_hash, expires_at=expires_at)
     db.add(link)
     db.commit()
     return f"{base_url}/register?token={raw_token}"
 
 
-def redeem_magic_link(raw_token: str, user_agent: str, db: Session) -> SurgeonDevice:
+def redeem_magic_link(raw_token: str, user_agent: str, db: Session) -> RvuStaffDevice:
     """Validate magic link and return the staff device session.
 
     One active registration per surgeon: refresh the most recently seen device row
@@ -83,10 +83,10 @@ def redeem_magic_link(raw_token: str, user_agent: str, db: Session) -> SurgeonDe
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     now = datetime.now(timezone.utc)
 
-    link = db.query(MagicLink).filter(
-        MagicLink.token_hash == token_hash,
-        MagicLink.used_at.is_(None),
-        MagicLink.expires_at > now,
+    link = db.query(RvuMagicLink).filter(
+        RvuMagicLink.token_hash == token_hash,
+        RvuMagicLink.used_at.is_(None),
+        RvuMagicLink.expires_at > now,
     ).first()
 
     if not link:
@@ -95,25 +95,25 @@ def redeem_magic_link(raw_token: str, user_agent: str, db: Session) -> SurgeonDe
     # Mark link as used (still single-use — prevents replay)
     link.used_at = now
 
-    device = create_or_refresh_surgeon_device_session(link.surgeon_id, user_agent, db)
+    device = create_or_refresh_surgeon_device_session(link.staff_id, user_agent, db)
 
     # Attach raw token so the caller can return it in the response body
     return device
 
 
 def create_or_refresh_surgeon_device_session(
-    surgeon_id: int,
+    staff_id: int,
     user_agent: str,
     db: Session,
-) -> SurgeonDevice:
+) -> RvuStaffDevice:
     """Create or refresh the current device session for a surgeon."""
     raw_device_token = secrets.token_urlsafe(64)
     device_token_hash = hashlib.sha256(raw_device_token.encode()).hexdigest()
     device_name = _parse_device_name(user_agent)
     devices = (
-        db.query(SurgeonDevice)
-        .filter(SurgeonDevice.surgeon_id == surgeon_id)
-        .order_by(desc(SurgeonDevice.last_seen), desc(SurgeonDevice.id))
+        db.query(RvuStaffDevice)
+        .filter(RvuStaffDevice.staff_id == staff_id)
+        .order_by(desc(RvuStaffDevice.last_seen), desc(RvuStaffDevice.id))
         .all()
     )
     now = datetime.now(timezone.utc)
@@ -128,8 +128,8 @@ def create_or_refresh_surgeon_device_session(
         for other in devices[1:]:
             other.is_active = False
     else:
-        device = SurgeonDevice(
-            surgeon_id=surgeon_id,
+        device = RvuStaffDevice(
+            staff_id=staff_id,
             device_name=device_name,
             user_agent=user_agent,
             token_hash=device_token_hash,
@@ -160,7 +160,7 @@ def _parse_device_name(ua: str) -> str:
     return "Unknown Device"
 
 
-# ── Surgeon Device Auth ──────────────────────────────────────────────────────
+# ── RvuStaff Device Auth ──────────────────────────────────────────────────────
 
 def create_surgeon_session_token(device_id: int) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=SURGEON_TOKEN_EXPIRE_DAYS)
@@ -171,7 +171,7 @@ def get_current_surgeon(
     request: Request,
     surgeon_token: str | None = Cookie(default=None),
     db: Session = Depends(get_db),
-) -> tuple[Surgeon, SurgeonDevice]:
+) -> tuple[RvuStaff, RvuStaffDevice]:
     token = surgeon_token or request.cookies.get("surgeon_token")
     if not token:
         raise HTTPException(status_code=302, headers={"Location": "/surgeon/register"})
@@ -183,7 +183,7 @@ def get_current_surgeon(
     except (JWTError, ValueError):
         raise HTTPException(status_code=302, headers={"Location": "/surgeon/register"})
 
-    device = db.get(SurgeonDevice, device_id)
+    device = db.get(RvuStaffDevice, device_id)
     if not device or not device.is_active:
         raise HTTPException(status_code=302, headers={"Location": "/surgeon/register"})
 
@@ -191,8 +191,8 @@ def get_current_surgeon(
     device.last_seen = datetime.now(timezone.utc)
     db.commit()
 
-    surgeon = db.get(Surgeon, device.surgeon_id)
-    if not surgeon or not surgeon.is_active:
+    staff = db.get(RvuStaff, device.staff_id)
+    if not staff or not staff.is_active:
         raise HTTPException(status_code=302, headers={"Location": "/surgeon/register"})
 
-    return surgeon, device
+    return staff, device

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
-from app.cal_models import Surgeon
+from app.models_identity import RvuStaff
 from app.database import get_db
 from app.models_rvu import RvuOpNote, RvuScan, RvuUserSettings
 from app.rvu.lookup import CF_2026
@@ -273,7 +273,7 @@ def _settings_dict(row: RvuUserSettings) -> dict[str, object]:
     }
 
 
-def _entry_row_dict(scan: RvuScan, surgeon: Surgeon | None = None) -> dict[str, object]:
+def _entry_row_dict(scan: RvuScan, surgeon: RvuStaff | None = None) -> dict[str, object]:
     line_items = _parse_line_items(scan.line_items)
     primary_lines = _primary_line_items(line_items)
     primary = primary_lines[0] if primary_lines else {}
@@ -306,7 +306,7 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _is_dev_staff(surgeon: Surgeon) -> bool:
+def _is_dev_staff(surgeon: RvuStaff) -> bool:
     allowed_emails = {
         e.strip().lower()
         for e in os.environ.get("RVU_DEV_STAFF_EMAILS", "").split(",")
@@ -472,7 +472,7 @@ def _prepare_uploaded_image(raw: bytes) -> tuple[bytes, int, int]:
     return shrunk, orig_kb, len(shrunk) // 1024
 
 
-def _provider_mentions_other_physician(provider: str, other: Surgeon, anchor: Surgeon) -> bool:
+def _provider_mentions_other_physician(provider: str, other: RvuStaff, anchor: RvuStaff) -> bool:
     """Conservative name match for fan-out (requires last name + first name or full-name overlap)."""
     p = re.sub(r"\s+", " ", str(provider or "").strip())
     if len(p) < 4 or other.id == anchor.id:
@@ -511,16 +511,16 @@ def _maybe_fanout_charge_capture_for_other_surgeons(
         return
     if not scan.image_data or not _stored_binary_usable(scan.image_data):
         return
-    anchor = db.get(Surgeon, scan.surgeon_id)
+    anchor = db.get(RvuStaff, scan.surgeon_id)
     if not anchor or not anchor.is_active:
         return
     raw_lines = cap_lines if isinstance(cap_lines, list) else []
     candidates = (
-        db.query(Surgeon)
+        db.query(RvuStaff)
         .filter(
-            Surgeon.is_active == True,  # noqa: E712
-            Surgeon.id != anchor.id,
-            or_(Surgeon.staff_type.is_(None), Surgeon.staff_type.ilike("%physician%")),
+            RvuStaff.is_active == True,  # noqa: E712
+            RvuStaff.id != anchor.id,
+            or_(RvuStaff.staff_type.is_(None), RvuStaff.staff_type.ilike("%physician%")),
         )
         .all()
     )
@@ -535,7 +535,7 @@ def _maybe_fanout_charge_capture_for_other_surgeons(
         pname = str(L.get("provider_name") or "").strip()
         if not pname:
             continue
-        matched: Surgeon | None = None
+        matched: RvuStaff | None = None
         for s in candidates:
             if _provider_mentions_other_physician(pname, s, anchor):
                 matched = s
@@ -637,7 +637,7 @@ def _main_cpt_summary(cap: dict, payload: dict) -> tuple[str | None, str | None]
 def _create_pending_scan_stub(
     *,
     db: Session,
-    surgeon: Surgeon,
+    surgeon: RvuStaff,
     locality: str,
     facility: bool,
     cf: float,
@@ -727,7 +727,7 @@ def _apply_pending_scan_result(
 def _persist_capture_result(
     *,
     db: Session,
-    surgeon: Surgeon,
+    surgeon: RvuStaff,
     payload: dict,
     cap: dict,
     locality: str,
@@ -788,7 +788,7 @@ def _finalize_capture_response(
     elapsed: float,
     persisted: bool,
     scan: RvuScan | None = None,
-    surgeon: Surgeon | None = None,
+    surgeon: RvuStaff | None = None,
     include_staff: bool = False,
 ) -> dict:
     response = {
@@ -869,7 +869,7 @@ def _reconciliation_line_items(lines: list[dict] | None) -> list[dict]:
 def _build_reconciliation_draft(
     *,
     cap: dict,
-    surgeon: Surgeon,
+    surgeon: RvuStaff,
     provider: str,
     elapsed: float,
     locality: str,
@@ -1067,7 +1067,7 @@ class VisionConfigPatch(BaseModel):
 
 @router.get("/dev/vision-config")
 def staff_dev_get_vision_config(
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     if not _is_dev_staff(surgeon):
@@ -1077,7 +1077,7 @@ def staff_dev_get_vision_config(
 
 @router.get("/vision-config")
 def staff_get_vision_config(
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     _surgeon, _ = auth
     return cpt_svc.get_vision_config()
@@ -1086,7 +1086,7 @@ def staff_get_vision_config(
 @router.patch("/dev/vision-config")
 def staff_dev_set_vision_config(
     body: VisionConfigPatch,
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     if not _is_dev_staff(surgeon):
@@ -1106,7 +1106,7 @@ def staff_dev_set_vision_config(
 def preview_lookup(
     body: LookupBody,
     db: Session = Depends(get_db),
-    _auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     """Recalculate wRVU / payment from CPT list without persisting."""
     clean = payment_svc.clean_cpt_codes(body.cpts)
@@ -1129,7 +1129,7 @@ def preview_lookup(
 def direct_lookup(
     body: LookupBody,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     clean = payment_svc.clean_cpt_codes(body.cpts)
@@ -1204,7 +1204,7 @@ async def commit_scan(
     elapsed_secs: float = Form(0.0),
     image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     """Persist a reviewed capture. Accepts optional image upload."""
     surgeon, _ = auth
@@ -1288,7 +1288,7 @@ class TextScanBody(BaseModel):
 def text_stream(
     body: TextScanBody,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
     rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
     surgeon, _ = auth
@@ -1372,7 +1372,7 @@ def text_stream(
 def text_scan(
     body: TextScanBody,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
     rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
     """Non-streaming JSON endpoint for native app; same logic as text-stream."""
@@ -1440,7 +1440,7 @@ async def vision_scan(
     patient_name: Optional[str] = Form(None),
     service_date: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
     rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
     """Non-streaming JSON endpoint for native app; same logic as vision-stream."""
@@ -1620,7 +1620,7 @@ async def reconciliation_draft(
     patient_name: Optional[str] = Form(None),
     service_date: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     """Return a fast, reviewable reconciliation draft without persisting."""
     surgeon, _ = auth
@@ -1659,7 +1659,7 @@ async def vision_stream(
     patient_name: Optional[str] = Form(None),
     service_date: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
     rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
     surgeon, _ = auth
@@ -1770,7 +1770,7 @@ async def vision_stream(
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-def _scan_history_dict(s: RvuScan, surgeon: "Surgeon | None" = None) -> dict:
+def _scan_history_dict(s: RvuScan, surgeon: "RvuStaff | None" = None) -> dict:
     line_parsed = _parse_line_items(s.line_items)
     return {
         "id": s.id,
@@ -1805,7 +1805,7 @@ def _scan_history_dict(s: RvuScan, surgeon: "Surgeon | None" = None) -> dict:
 @router.get("/history")
 def staff_history(
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     scans = (
@@ -1821,7 +1821,7 @@ def staff_history(
 @router.get("/pending")
 def staff_pending_scans(
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     scans = (
@@ -2103,7 +2103,7 @@ def _build_setting_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
 @router.get("/settings")
 def staff_get_settings(
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     return _settings_dict(_get_or_create_user_settings(db, surgeon.id))
@@ -2113,7 +2113,7 @@ def staff_get_settings(
 def staff_patch_settings(
     body: SettingsBody,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     row = _get_or_create_user_settings(db, surgeon.id)
@@ -2138,7 +2138,7 @@ def staff_patch_settings(
 def staff_today_scans(
     date_value: str | None = None,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     target = payment_svc.parse_service_date(date_value) if date_value else datetime.now().date()
@@ -2157,7 +2157,7 @@ def staff_today_scans(
 @router.get("/history/months")
 def staff_history_months(
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     scans = _load_staff_scans(db, surgeon.id)
@@ -2168,7 +2168,7 @@ def staff_history_months(
 def staff_history_days(
     month: str,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     if not re.fullmatch(r"\d{4}-\d{2}", month):
         raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
@@ -2185,7 +2185,7 @@ def staff_history_days(
 @router.get("/history/days")
 def staff_history_days_index(
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     scans = _load_staff_scans(db, surgeon.id)
@@ -2197,7 +2197,7 @@ def staff_history_days_index(
 def staff_history_day_detail(
     day_value: str,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     target = payment_svc.parse_service_date(day_value)
     if target is None:
@@ -2222,7 +2222,7 @@ def staff_history_day_detail(
 def staff_stats(
     range: str = "month",
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     settings = _get_or_create_user_settings(db, surgeon.id)
@@ -2263,7 +2263,7 @@ def staff_stats(
 def staff_get_scan(
     scan_id: int,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     scan = db.query(RvuScan).filter(
@@ -2278,7 +2278,7 @@ def staff_get_scan(
 def create_manual_draft(
     body: ManualDraftBody,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     locality = (body.locality or "99").zfill(2)
@@ -2320,9 +2320,9 @@ def patch_scan(
     scan_id: int,
     body: ScanPatchBody,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
-    """Surgeon edits their own scan — recalculates RVU/payment and persists."""
+    """RvuStaff edits their own scan — recalculates RVU/payment and persists."""
     surgeon, _ = auth
     scan = db.query(RvuScan).filter(
         RvuScan.id == scan_id, RvuScan.surgeon_id == surgeon.id,
@@ -2391,7 +2391,7 @@ def patch_scan(
 def verify_scan(
     scan_id: int,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     scan = db.query(RvuScan).filter(
@@ -2426,9 +2426,9 @@ def verify_scan(
 def delete_scan(
     scan_id: int,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
-    """Surgeon deletes their own scan record."""
+    """RvuStaff deletes their own scan record."""
     surgeon, _ = auth
     scan = db.query(RvuScan).filter(
         RvuScan.id == scan_id, RvuScan.surgeon_id == surgeon.id,
@@ -2444,7 +2444,7 @@ def delete_scan(
 def get_scan_image(
     scan_id: int,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     """Return the original scan image for a surgeon's own scan."""
     surgeon, _ = auth
@@ -2473,7 +2473,7 @@ class StaffModifierRulePatch(BaseModel):
 def staff_list_cpt_library(
     search: str = "",
     db: Session = Depends(get_db),
-    _auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     return {"cpts": list_cpt_catalog(db, search)}
 
@@ -2483,7 +2483,7 @@ def staff_patch_cpt_library(
     cpt: str,
     body: StaffCptRulePatch,
     db: Session = Depends(get_db),
-    _auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     try:
         return patch_cpt_rule(
@@ -2500,7 +2500,7 @@ def staff_patch_cpt_library(
 @router.get("/modifier-library")
 def staff_list_modifier_library(
     db: Session = Depends(get_db),
-    _auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     return {"modifiers": list_modifier_rules(db)}
 
@@ -2510,7 +2510,7 @@ def staff_patch_modifier_library(
     code: str,
     body: StaffModifierRulePatch,
     db: Session = Depends(get_db),
-    _auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     try:
         return patch_modifier_rule(db, code, factor=body.factor, desc=body.desc)
@@ -2536,7 +2536,7 @@ def _op_note_dict(n: RvuOpNote, surgeon_name: str | None) -> dict:
 async def staff_upload_op_note(
     image: UploadFile = File(...),
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
     rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
     """Snap an operative note; vision model transcribes text and stores image + text for the portal."""
@@ -2588,7 +2588,7 @@ async def staff_upload_op_note(
 @router.get("/op-note/history")
 def staff_op_note_history(
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
     limit: int = 50,
 ):
     surgeon, _ = auth
@@ -2607,7 +2607,7 @@ def staff_op_note_history(
 def staff_get_op_note_detail(
     note_id: int,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     note = db.get(RvuOpNote, note_id)
@@ -2622,7 +2622,7 @@ def staff_get_op_note_detail(
 def staff_get_op_note_image(
     note_id: int,
     db: Session = Depends(get_db),
-    auth: tuple[Surgeon, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
     note = db.get(RvuOpNote, note_id)
@@ -2726,7 +2726,7 @@ def portal_all_scans(
     scans = db.query(RvuScan).order_by(desc(RvuScan.scanned_at)).limit(limit).all()
     out = []
     for s in scans:
-        sur = db.get(Surgeon, s.surgeon_id)
+        sur = db.get(RvuStaff, s.surgeon_id)
         row = _scan_history_dict(s)
         row["surgeon_id"] = s.surgeon_id
         row["surgeon_name"] = sur.full_name if sur else None
@@ -2870,7 +2870,7 @@ def portal_patch_scan(
 
     db.commit()
     db.refresh(scan)
-    sur = db.get(Surgeon, scan.surgeon_id)
+    sur = db.get(RvuStaff, scan.surgeon_id)
     row = _scan_history_dict(scan)
     row["surgeon_id"] = scan.surgeon_id
     row["surgeon_name"] = sur.full_name if sur else None
@@ -2901,7 +2901,7 @@ def portal_list_op_notes(
     notes = db.query(RvuOpNote).order_by(desc(RvuOpNote.scanned_at)).limit(limit).all()
     out = []
     for n in notes:
-        sur = db.get(Surgeon, n.surgeon_id)
+        sur = db.get(RvuStaff, n.surgeon_id)
         out.append(_op_note_dict(n, sur.full_name if sur else None))
     return {"notes": out}
 

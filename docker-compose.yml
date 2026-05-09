@@ -5,5 +5,6 @@ services:
       dockerfile: Dockerfile
     container_name: rvu_api
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - ${RVU_ENV_FILE:-.env}
     network_mode: host

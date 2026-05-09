@@ -21,7 +21,7 @@ from app.auth import (
     redeem_magic_link,
     verify_password,
 )
-from app.cal_models import AdminUser, Surgeon
+from app.models_identity import RvuAdminUser, RvuStaff
 from app.database import get_db
 from app.services import email_service
 from app.services.email_service import send_magic_link_email, send_notification_email
@@ -72,7 +72,7 @@ def api_register(body: RegisterBody, request: Request, db: Session = Depends(get
     device = redeem_magic_link(body.token.strip(), ua, db)
 
     session_token = create_surgeon_session_token(device.id)
-    surgeon = db.get(Surgeon, device.surgeon_id)
+    surgeon = db.get(RvuStaff, device.staff_id)
     resp = JSONResponse(
         {
             "ok": True,
@@ -104,8 +104,8 @@ def api_register(body: RegisterBody, request: Request, db: Session = Depends(get
 def staff_request_otp(body: StaffOtpRequestBody, db: Session = Depends(get_db)):
     email = _normalize_email(body.email)
     surgeon = (
-        db.query(Surgeon)
-        .filter(Surgeon.email == email, Surgeon.is_active == True)  # noqa: E712
+        db.query(RvuStaff)
+        .filter(RvuStaff.email == email, RvuStaff.is_active == True)  # noqa: E712
         .first()
     )
     if surgeon and surgeon.email:
@@ -161,7 +161,7 @@ def staff_verify_otp(body: StaffOtpVerifyBody, request: Request, db: Session = D
         surgeon_id = int(payload["surgeon_id"])
         _staff_otp_store.pop(email, None)
 
-    surgeon = db.get(Surgeon, surgeon_id)
+    surgeon = db.get(RvuStaff, surgeon_id)
     if not surgeon or not surgeon.is_active:
         raise HTTPException(status_code=400, detail="Staff account inactive.")
 
@@ -193,7 +193,7 @@ def staff_verify_otp(body: StaffOtpVerifyBody, request: Request, db: Session = D
 
 
 @router.get("/me")
-def api_me(auth: tuple[Surgeon, object] = Depends(get_current_staff)):
+def api_me(auth: tuple[RvuStaff, object] = Depends(get_current_staff)):
     surgeon, _device = auth
     return {
         "id": surgeon.id,
@@ -219,11 +219,11 @@ class PortalLoginBody(BaseModel):
 @router.post("/portal/login")
 def portal_login(body: PortalLoginBody, db: Session = Depends(get_db)):
     admin = (
-        db.query(AdminUser)
+        db.query(RvuAdminUser)
         .filter(
-            (AdminUser.username == body.username.strip().lower())
-            | (AdminUser.email == body.username.strip().lower()),
-            AdminUser.is_active == True,  # noqa: E712
+            (RvuAdminUser.username == body.username.strip().lower())
+            | (RvuAdminUser.email == body.username.strip().lower()),
+            RvuAdminUser.is_active == True,  # noqa: E712
         )
         .first()
     )
@@ -272,14 +272,14 @@ def get_current_admin_api(
         admin_id = int(payload["sub"])
     except (JWTError, ValueError, KeyError):
         raise HTTPException(status_code=401, detail="Invalid portal session")
-    admin = db.get(AdminUser, admin_id)
+    admin = db.get(RvuAdminUser, admin_id)
     if not admin or not admin.is_active:
         raise HTTPException(status_code=401, detail="Invalid portal session")
     return admin
 
 
 @router.get("/portal/me")
-def portal_me(admin: AdminUser = Depends(get_current_admin_api)):
+def portal_me(admin: RvuAdminUser = Depends(get_current_admin_api)):
     return {"id": admin.id, "username": admin.username, "email": admin.email, "role": admin.role}
 
 
@@ -316,9 +316,9 @@ def _normalize_role(role: str) -> str:
 @router.get("/portal/users")
 def portal_users_list(
     db: Session = Depends(get_db),
-    _admin: AdminUser = Depends(get_current_admin_api),
+    _admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
-    users = db.query(AdminUser).order_by(AdminUser.username).all()
+    users = db.query(RvuAdminUser).order_by(RvuAdminUser.username).all()
     return {
         "users": [
             {
@@ -338,16 +338,16 @@ def portal_users_list(
 def portal_users_create(
     body: PortalUserCreateBody,
     db: Session = Depends(get_db),
-    _admin: AdminUser = Depends(get_current_admin_api),
+    _admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
     un = body.username.strip().lower()
     em = body.email.strip().lower()
-    if db.query(AdminUser).filter(AdminUser.username == un).first():
+    if db.query(RvuAdminUser).filter(RvuAdminUser.username == un).first():
         raise HTTPException(status_code=409, detail="Username already taken")
-    if db.query(AdminUser).filter(AdminUser.email == em).first():
+    if db.query(RvuAdminUser).filter(RvuAdminUser.email == em).first():
         raise HTTPException(status_code=409, detail="Email already in use")
     role = _normalize_role(body.role)
-    u = AdminUser(
+    u = RvuAdminUser(
         username=un,
         email=em,
         password_hash=hash_password(body.password),
@@ -372,15 +372,15 @@ def portal_users_patch(
     user_id: int,
     body: PortalUserPatchBody,
     db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin_api),
+    admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
-    u = db.get(AdminUser, user_id)
+    u = db.get(RvuAdminUser, user_id)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
 
     if body.email is not None:
         em = body.email.strip().lower()
-        dup = db.query(AdminUser).filter(AdminUser.email == em, AdminUser.id != user_id).first()
+        dup = db.query(RvuAdminUser).filter(RvuAdminUser.email == em, RvuAdminUser.id != user_id).first()
         if dup:
             raise HTTPException(status_code=409, detail="Email already in use")
         u.email = em
@@ -396,8 +396,8 @@ def portal_users_patch(
             raise HTTPException(status_code=400, detail="You cannot deactivate your own account")
         if body.is_active is False:
             others = (
-                db.query(AdminUser)
-                .filter(AdminUser.is_active == True, AdminUser.id != u.id)  # noqa: E712
+                db.query(RvuAdminUser)
+                .filter(RvuAdminUser.is_active == True, RvuAdminUser.id != u.id)  # noqa: E712
                 .count()
             )
             if others == 0:
@@ -420,17 +420,17 @@ def portal_users_patch(
 def portal_users_delete(
     user_id: int,
     db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin_api),
+    admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
     """Soft-delete (deactivate) a portal user."""
-    u = db.get(AdminUser, user_id)
+    u = db.get(RvuAdminUser, user_id)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
     if u.id == admin.id:
         raise HTTPException(status_code=400, detail="You cannot delete your own account")
     others = (
-        db.query(AdminUser)
-        .filter(AdminUser.is_active == True, AdminUser.id != u.id)  # noqa: E712
+        db.query(RvuAdminUser)
+        .filter(RvuAdminUser.is_active == True, RvuAdminUser.id != u.id)  # noqa: E712
         .count()
     )
     if others == 0:
@@ -470,12 +470,12 @@ class SendMagicLinkBody(BaseModel):
 def send_magic_link(
     body: SendMagicLinkBody,
     db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin_api),
+    admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
     """Generate a fresh magic link + QR code. Emails it if the surgeon has an address."""
-    surgeon = db.get(Surgeon, body.surgeon_id)
+    surgeon = db.get(RvuStaff, body.surgeon_id)
     if not surgeon or not surgeon.is_active:
-        raise HTTPException(status_code=404, detail="Surgeon not found or inactive")
+        raise HTTPException(status_code=404, detail="RvuStaff not found or inactive")
 
     magic_url = generate_magic_link_token(surgeon.id, db, BASE_URL)
     qr_b64 = _make_qr_b64(magic_url)
@@ -505,22 +505,22 @@ def send_magic_link(
 @router.get("/admin/staff")
 def list_staff(
     db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin_api),
+    admin: RvuAdminUser = Depends(get_current_admin_api),
     include_inactive: bool = False,
 ):
     """Return surgeons/staff."""
-    q = db.query(Surgeon)
+    q = db.query(RvuStaff)
     if not include_inactive:
-        q = q.filter(Surgeon.is_active == True)  # noqa: E712
+        q = q.filter(RvuStaff.is_active == True)  # noqa: E712
     from sqlalchemy import case
 
     physician_first = case(
-        (Surgeon.staff_type.is_(None), 1),
-        (Surgeon.staff_type.ilike("physician"), 0),
+        (RvuStaff.staff_type.is_(None), 1),
+        (RvuStaff.staff_type.ilike("physician"), 0),
         else_=1,
     )
     surgeons = (
-        q.order_by(physician_first, Surgeon.last_name, Surgeon.first_name).all()
+        q.order_by(physician_first, RvuStaff.last_name, RvuStaff.first_name).all()
     )
     return {
         "staff": [
@@ -555,14 +555,14 @@ class StaffCreateBody(BaseModel):
 def create_staff(
     body: StaffCreateBody,
     db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin_api),
+    admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
     """Add a new surgeon/staff member."""
     if body.email:
-        existing = db.query(Surgeon).filter(Surgeon.email == body.email).first()
+        existing = db.query(RvuStaff).filter(RvuStaff.email == body.email).first()
         if existing:
             raise HTTPException(status_code=409, detail="A staff member with that email already exists.")
-    s = Surgeon(
+    s = RvuStaff(
         first_name=body.first_name.strip(),
         last_name=body.last_name.strip(),
         suffix=body.suffix.strip() if body.suffix else None,
@@ -604,10 +604,10 @@ def patch_staff(
     surgeon_id: int,
     body: StaffPatchBody,
     db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin_api),
+    admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
     """Update a surgeon/staff record."""
-    s = db.get(Surgeon, surgeon_id)
+    s = db.get(RvuStaff, surgeon_id)
     if not s:
         raise HTTPException(status_code=404, detail="Staff member not found")
 
@@ -622,7 +622,7 @@ def patch_staff(
     if body.email is not None:
         clean_email = body.email.strip() or None
         if clean_email:
-            dup = db.query(Surgeon).filter(Surgeon.email == clean_email, Surgeon.id != surgeon_id).first()
+            dup = db.query(RvuStaff).filter(RvuStaff.email == clean_email, RvuStaff.id != surgeon_id).first()
             if dup:
                 raise HTTPException(status_code=409, detail="That email is already used by another staff member.")
         s.email = clean_email
@@ -651,14 +651,14 @@ def patch_staff(
 @router.get("/admin/devices")
 def list_devices(
     db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin_api),
+    admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
     """Return one device row per staff member (most recently seen)."""
-    from app.cal_models import SurgeonDevice
+    from app.models_identity import RvuStaffDevice
 
     devices = (
-        db.query(SurgeonDevice)
-        .order_by(SurgeonDevice.last_seen.desc().nulls_last(), SurgeonDevice.id.desc())
+        db.query(RvuStaffDevice)
+        .order_by(RvuStaffDevice.last_seen.desc().nulls_last(), RvuStaffDevice.id.desc())
         .all()
     )
     seen_surgeon: set[int] = set()
@@ -667,7 +667,7 @@ def list_devices(
         if d.surgeon_id in seen_surgeon:
             continue
         seen_surgeon.add(d.surgeon_id)
-        surgeon = db.get(Surgeon, d.surgeon_id)
+        surgeon = db.get(RvuStaff, d.surgeon_id)
         out.append({
             "id": d.id,
             "surgeon_id": d.surgeon_id,
@@ -686,16 +686,16 @@ def patch_device(
     device_id: int,
     body: dict,
     db: Session = Depends(get_db),
-    admin: AdminUser = Depends(get_current_admin_api),
+    admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
-    from app.cal_models import SurgeonDevice
-    device = db.get(SurgeonDevice, device_id)
+    from app.models_identity import RvuStaffDevice
+    device = db.get(RvuStaffDevice, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     if "is_active" in body:
         device.is_active = bool(body["is_active"])
     db.commit()
-    surgeon = db.get(Surgeon, device.surgeon_id)
+    surgeon = db.get(RvuStaff, device.staff_id)
     return {
         "id": device.id,
         "surgeon_name": surgeon.full_name if surgeon else "Unknown",

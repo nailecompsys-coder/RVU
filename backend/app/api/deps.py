@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.auth import ALGORITHM, SECRET_KEY
-from app.cal_models import Surgeon, SurgeonDevice
+from app.models_identity import RvuStaff, RvuStaffDevice
 from app.database import get_db
 
 
@@ -16,7 +16,7 @@ def get_current_staff(
     request: Request,
     surgeon_token: str | None = Cookie(default=None),
     db: Session = Depends(get_db),
-) -> tuple[Surgeon, SurgeonDevice]:
+) -> tuple[RvuStaff, RvuStaffDevice]:
     # Cookie first; fall back to Authorization: Bearer header (needed for iOS
     # standalone / in-app-browser contexts where httponly cookies are isolated).
     token = surgeon_token or request.cookies.get("surgeon_token")
@@ -37,15 +37,15 @@ def get_current_staff(
     except (JWTError, ValueError, KeyError):
         raise HTTPException(status_code=401, detail="Invalid session")
 
-    device = db.get(SurgeonDevice, device_id)
+    device = db.get(RvuStaffDevice, device_id)
     if not device or not device.is_active:
         raise HTTPException(status_code=401, detail="Device session revoked")
 
     device.last_seen = datetime.now(timezone.utc)
     db.commit()
 
-    surgeon = db.get(Surgeon, device.surgeon_id)
-    if not surgeon or not surgeon.is_active:
+    staff = db.get(RvuStaff, device.staff_id)
+    if not staff or not staff.is_active:
         raise HTTPException(status_code=401, detail="Staff account inactive")
 
-    return surgeon, device
+    return staff, device
