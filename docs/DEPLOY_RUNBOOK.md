@@ -15,6 +15,18 @@ cd /home/dnaile748/rvu
 scripts/preflight_env_parity.sh
 ```
 
+## Shadow refresh before cutover
+
+For the final RVU VM cutover window, refresh `rvu_prod` from live shared data first:
+
+```bash
+cd /home/dnaile748/rvu
+scripts/sync_shadow_from_prod.sh 192.168.5.61
+```
+
+That sync preserves device/session continuity, imports current active magic links,
+and prunes stale shadow-only rows.
+
 ## 2) Build frontend (if frontend changed)
 
 ```bash
@@ -52,6 +64,22 @@ curl -sf http://127.0.0.1:3010/api/health
 curl -I https://rvu.midfloridasurgical.com
 echo | openssl s_client -connect rvu.midfloridasurgical.com:443 -servername rvu.midfloridasurgical.com 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName
 ```
+
+## Coordinated cutover
+
+On the old edge host, the native app still hits `cal.midfloridasurgical.com` for OTP.
+During cutover, switch public RVU traffic and the CAL OTP bridge together:
+
+```bash
+cd /home/dnaile748/rvu
+deploy/cutover_to_rvu_vm.sh 192.168.5.61
+```
+
+That script:
+
+- points `rvu.midfloridasurgical.com` at the RVU VM
+- bridges `cal.midfloridasurgical.com/api/surgeon/otp/*` to RVU auth on the VM
+- backs up both nginx config files before reload
 
 ## Rollback procedure
 

@@ -12,11 +12,29 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models_identity import RvuAdminUser, RvuMagicLink, RvuStaff, RvuStaffDevice
 
-SECRET_KEY = os.environ.get("RVU_SECRET_KEY") or os.environ["SECRET_KEY"]
+PRIMARY_SECRET_KEY = os.environ.get("RVU_SECRET_KEY") or os.environ["SECRET_KEY"]
+SECRET_KEY = PRIMARY_SECRET_KEY
 ALGORITHM = "HS256"
 ADMIN_TOKEN_EXPIRE_HOURS = 12
 SURGEON_TOKEN_EXPIRE_DAYS = 365  # device tokens are long-lived
 MAGIC_LINK_EXPIRE_HOURS = int(os.environ.get("MAGIC_LINK_EXPIRE_HOURS", "168"))  # default 7 days
+
+
+def _legacy_secret_keys() -> list[str]:
+    raw_keys = [os.environ.get("SECRET_KEY", "")]
+    extra = os.environ.get("RVU_LEGACY_SECRET_KEYS", "")
+    if extra.strip():
+        raw_keys.extend(part.strip() for part in extra.split(","))
+
+    out: list[str] = []
+    for key in raw_keys:
+        if not key or key == PRIMARY_SECRET_KEY or key in out:
+            continue
+        out.append(key)
+    return out
+
+
+LEGACY_SECRET_KEYS = _legacy_secret_keys()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -29,6 +47,25 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
+
+
+def decode_subject_token(token: str, expected_type: str) -> int:
+    """Decode a JWT using the active RVU secret, then any configured legacy secrets.
+
+    This keeps existing mobile/PWA sessions valid during the CAL -> RVU auth
+    cutover while allowing newly issued RVU tokens to use the RVU-owned secret.
+    """
+    last_error: Exception | None = None
+    for signing_key in [PRIMARY_SECRET_KEY, *LEGACY_SECRET_KEYS]:
+        try:
+            payload = jwt.decode(token, signing_key, algorithms=[ALGORITHM])
+            if payload.get("type") != expected_type:
+                raise JWTError("Unexpected token type")
+            return int(payload["sub"])
+        except (JWTError, ValueError, KeyError) as exc:
+            last_error = exc
+            continue
+    raise JWTError("Invalid token") from last_error
 
 
 # ── Admin JWT ────────────────────────────────────────────────────────────────
@@ -47,11 +84,8 @@ def get_current_admin(
     if not token:
         raise HTTPException(status_code=302, headers={"Location": "/admin/login"})
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get("type") != "admin":
-            raise HTTPException(status_code=302, headers={"Location": "/admin/login"})
-        admin_id = int(payload["sub"])
-    except (JWTError, ValueError):
+        admin_id = decode_subject_token(token, "admin")
+    except JWTError:
         raise HTTPException(status_code=302, headers={"Location": "/admin/login"})
     admin = db.get(RvuAdminUser, admin_id)
     if not admin or not admin.is_active:
@@ -176,11 +210,8 @@ def get_current_surgeon(
     if not token:
         raise HTTPException(status_code=302, headers={"Location": "/surgeon/register"})
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get("type") != "surgeon":
-            raise HTTPException(status_code=302, headers={"Location": "/surgeon/register"})
-        device_id = int(payload["sub"])
-    except (JWTError, ValueError):
+        device_id = decode_subject_token(token, "surgeon")
+    except JWTError:
         raise HTTPException(status_code=302, headers={"Location": "/surgeon/register"})
 
     device = db.get(RvuStaffDevice, device_id)

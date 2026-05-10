@@ -4,10 +4,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import Cookie, Depends, HTTPException, Request, status
-from jose import JWTError, jwt
+from jose import JWTError
 from sqlalchemy.orm import Session
 
-from app.auth import ALGORITHM, SECRET_KEY
+from app.auth import decode_subject_token
 from app.models_identity import RvuStaff, RvuStaffDevice
 from app.database import get_db
 
@@ -30,11 +30,8 @@ def get_current_staff(
             detail="Not signed in. Open your magic link to register this device.",
         )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get("type") != "surgeon":
-            raise HTTPException(status_code=401, detail="Invalid session")
-        device_id = int(payload["sub"])
-    except (JWTError, ValueError, KeyError):
+        device_id = decode_subject_token(token, "surgeon")
+    except JWTError:
         raise HTTPException(status_code=401, detail="Invalid session")
 
     device = db.get(RvuStaffDevice, device_id)

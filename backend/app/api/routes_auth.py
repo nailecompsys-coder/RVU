@@ -254,9 +254,9 @@ def get_current_admin_api(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    from jose import JWTError, jwt
+    from jose import JWTError
 
-    from app.auth import ALGORITHM, SECRET_KEY
+    from app.auth import decode_subject_token
 
     token = request.cookies.get("admin_token")
     if not token:
@@ -266,11 +266,8 @@ def get_current_admin_api(
     if not token:
         raise HTTPException(status_code=401, detail="Portal login required")
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload.get("type") != "admin":
-            raise HTTPException(status_code=401, detail="Invalid portal session")
-        admin_id = int(payload["sub"])
-    except (JWTError, ValueError, KeyError):
+        admin_id = decode_subject_token(token, "admin")
+    except JWTError:
         raise HTTPException(status_code=401, detail="Invalid portal session")
     admin = db.get(RvuAdminUser, admin_id)
     if not admin or not admin.is_active:

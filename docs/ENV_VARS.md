@@ -8,6 +8,7 @@ This is the canonical env contract for RVU across local and production.
 |---|---|---|
 | `DATABASE_URL` | `postgresql://user:pass@127.0.0.1:5432/surgical_cal` | Primary DB connection string |
 | `SECRET_KEY` | long random string | JWT/session signing key |
+| `RVU_SECRET_KEY` | long random string | Optional RVU-owned signing key for isolated cutover; when set, new RVU tokens are signed with this key |
 | `BASE_URL` | `https://rvu.midfloridasurgical.com` | Absolute URL generation |
 | `RVU_CORS_ORIGINS` | comma-separated URLs | Allowed browser origins |
 | `RVU_COOKIE_SECURE` | `true`/`false` | Secure cookie enforcement |
@@ -17,6 +18,7 @@ This is the canonical env contract for RVU across local and production.
 | Variable | Example | Notes |
 |---|---|---|
 | `CAL_URL` | `https://cal.midfloridasurgical.com` | Redirect target for shared surgeon flow |
+| `RVU_LEGACY_SECRET_KEYS` | `oldkey1,oldkey2` | Optional extra legacy JWT secrets to accept during transition. If `RVU_SECRET_KEY` is set, `SECRET_KEY` is already accepted automatically as a legacy verifier. |
 
 ## Required for OCR/AI features
 
@@ -56,6 +58,7 @@ Required only if email sending is enabled.
 - `RVU_CORS_ORIGINS=https://rvu.midfloridasurgical.com`
 - `RVU_COOKIE_SECURE=true`
 - `DATABASE_URL` points to production DB endpoint on the production host
+- for staged cutover, keep `SECRET_KEY` populated with the legacy CAL/shared secret so existing native/PWA tokens can still be verified while new RVU-issued tokens move to `RVU_SECRET_KEY`
 
 ## Parity notes
 
