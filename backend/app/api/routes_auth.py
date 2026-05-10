@@ -658,16 +658,16 @@ def list_devices(
         .order_by(RvuStaffDevice.last_seen.desc().nulls_last(), RvuStaffDevice.id.desc())
         .all()
     )
-    seen_surgeon: set[int] = set()
+    seen_staff: set[int] = set()
     out = []
     for d in devices:
-        if d.surgeon_id in seen_surgeon:
+        if d.staff_id in seen_staff:
             continue
-        seen_surgeon.add(d.surgeon_id)
-        surgeon = db.get(RvuStaff, d.surgeon_id)
+        seen_staff.add(d.staff_id)
+        surgeon = db.get(RvuStaff, d.staff_id)
         out.append({
             "id": d.id,
-            "surgeon_id": d.surgeon_id,
+            "surgeon_id": d.staff_id,
             "surgeon_name": surgeon.full_name if surgeon else "Unknown",
             "device_name": d.device_name or "Unknown device",
             "user_agent": d.user_agent,
