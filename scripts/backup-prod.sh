@@ -3,14 +3,20 @@ set -euo pipefail
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${ROOT_DIR}/.env"
+if [[ -f "${ROOT_DIR}/.env.shadow" ]]; then
+  ENV_FILE="${ROOT_DIR}/.env.shadow"
+elif [[ -f "${ROOT_DIR}/.env" ]]; then
+  ENV_FILE="${ROOT_DIR}/.env"
+else
+  ENV_FILE="${ROOT_DIR}/.env"
+fi
 BACKUP_DIR="${HOME}/rvu-backups/${TIMESTAMP}"
 WASABI_DEST="${RVU_WASABI_DEST:-wasabi:mfsa-cal/rvu-backups/${TIMESTAMP}}"
 
 mkdir -p "${BACKUP_DIR}"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "Missing .env at ${ENV_FILE}"
+  echo "Missing env file at ${ENV_FILE}"
   exit 1
 fi
 
@@ -65,7 +71,7 @@ app=rvu
 database_name=${DB_NAME}
 database_host=${DB_HOST}
 database_port=${DB_PORT}
-note=RVU currently depends on the shared surgical_cal database boundary in production.
+env_file=${ENV_FILE}
 EOF
 
 echo "Creating RVU database dump ..."
