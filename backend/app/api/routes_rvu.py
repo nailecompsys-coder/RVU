@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 import logging
 from collections.abc import Callable
@@ -14,14 +15,18 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Uploa
 from typing import Optional
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, func, or_
 from sqlalchemy.orm import Session
 
 from app.models_identity import RvuStaff
 from app.database import get_db
-from app.models_rvu import RvuOpNote, RvuScan, RvuUserSettings
+from app.models_rvu import RvuOpNote, RvuScan, RvuScanAiRun, RvuUserSettings
 from app.rvu.lookup import CF_2026
-from app.services.rvu_cpt_service import RvuCptExtractionService, _cpts_for_surgeon_lines
+from app.services.rvu_cpt_service import (
+    RvuCptExtractionService,
+    _cpts_for_surgeon_lines,
+    _normalize_mrn_digits,
+)
 from app.services.rvu_payment_service import RvuPaymentService
 from app.services.rvu_rules_service import (
     get_effective_modifier_rules,
@@ -44,6 +49,49 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("rvu.scan")
 SUPPORT_EMAIL = os.environ.get("RVU_SUPPORT_EMAIL", "support@midfloridasurgical.com")
 APP_TIME_ZONE = ZoneInfo("America/New_York")
+
+
+def _normalized_mrn_or_none(value: str | None) -> str | None:
+    return _normalize_mrn_digits(value)
+
+
+def _normalize_capture_dates(
+    cap: dict,
+    *,
+    fallback_service_date: date | None = None,
+) -> dict:
+    out = {**cap}
+
+    def _fix_one(value: object) -> str | None:
+        parsed = payment_svc.parse_service_date(value)
+        if not parsed:
+            return None
+        if (
+            fallback_service_date is not None
+            and parsed.year != fallback_service_date.year
+            and parsed.month == fallback_service_date.month
+            and parsed.day == fallback_service_date.day
+        ):
+            return fallback_service_date.isoformat()
+        return parsed.isoformat()
+
+    fixed_top = _fix_one(out.get("service_date"))
+    if fixed_top:
+        out["service_date"] = fixed_top
+
+    lines_out: list[dict] = []
+    for line in out.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        line_copy = dict(line)
+        fixed_line = _fix_one(line_copy.get("line_service_date"))
+        if fixed_line:
+            line_copy["line_service_date"] = fixed_line
+        lines_out.append(line_copy)
+    if lines_out:
+        out["lines"] = lines_out
+
+    return out
 
 
 def _exception_client_message(exc: BaseException, *, max_len: int = 500) -> str:
@@ -133,12 +181,94 @@ def _parse_line_items(raw: str | None) -> list[dict]:
     return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
 
 
+def _parse_saved_json_object(raw: str | None) -> dict | list | None:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
 def _primary_line_items(line_items: list[dict]) -> list[dict]:
     return [
         item
         for item in line_items
         if not bool(item.get("is_assist"))
     ]
+
+
+def _is_assist_line_item(item: dict) -> bool:
+    return bool(item.get("is_assist")) or bool(re.search(r"\bAS\b", str(item.get("modifier") or ""), re.I))
+
+
+def _scan_financial_summary(scan: RvuScan, line_items: list[dict] | None = None) -> dict[str, float | int]:
+    items = line_items if line_items is not None else _parse_line_items(scan.line_items)
+    cpt_count = len(items)
+    assist_count = sum(1 for item in items if _is_assist_line_item(item))
+    surgeon_items = [item for item in items if not _is_assist_line_item(item)]
+    work_rvu = round(
+        sum(float(item.get("work_rvu") or 0.0) for item in surgeon_items),
+        2,
+    )
+    cf = float(scan.cf or 32.3465)
+    has_work_payment = any(item.get("work_payment") is not None for item in surgeon_items)
+    surgeon_value = round(
+        sum(float(item.get("work_payment") or 0.0) for item in surgeon_items) if has_work_payment else work_rvu * cf,
+        2,
+    )
+    total_payment = round(float(scan.total_payment or 0.0), 2)
+    facility_share = round(total_payment - surgeon_value, 2)
+    return {
+        "cpt_count": cpt_count,
+        "work_rvu": work_rvu,
+        "surgeon_value": surgeon_value,
+        "facility_share": facility_share,
+        "assist_count": assist_count,
+    }
+
+
+def _persist_ai_runs(db: Session, scan: RvuScan, cap: dict | None) -> None:
+    if not isinstance(cap, dict):
+        return
+    raw_runs = cap.get("_ai_runs")
+    if not isinstance(raw_runs, list) or not raw_runs:
+        return
+    db.query(RvuScanAiRun).filter(RvuScanAiRun.scan_id == scan.id).delete()
+    for idx, item in enumerate(raw_runs):
+        if not isinstance(item, dict):
+            continue
+        parsed_json = item.get("parsed_json")
+        db.add(
+            RvuScanAiRun(
+                scan_id=scan.id,
+                sequence_num=idx,
+                stage=str(item.get("stage") or "")[:64] or "unknown",
+                provider=(str(item.get("provider") or "").strip()[:32] or None),
+                model=(str(item.get("model") or "").strip()[:120] or None),
+                raw_response=str(item.get("raw_response") or "") or None,
+                parsed_json=(json.dumps(parsed_json, default=str) if parsed_json is not None else None),
+                error_text=(str(item.get("error_text") or "") or None),
+            )
+        )
+    db.commit()
+
+
+def _scan_ai_run_dict(run: RvuScanAiRun) -> dict:
+    return {
+        "id": run.id,
+        "scan_id": run.scan_id,
+        "sequence_num": run.sequence_num,
+        "stage": run.stage,
+        "provider": run.provider,
+        "model": run.model,
+        "raw_response": run.raw_response,
+        "parsed_json": _parse_saved_json_object(run.parsed_json),
+        "error_text": run.error_text,
+        "created_at": _iso_utc(run.created_at),
+        "created_at_et": _iso_et(run.created_at),
+    }
 
 
 def _is_verified_scan(scan: RvuScan) -> bool:
@@ -370,16 +500,27 @@ def _preview_from_capture(
     }
     if not cpts:
         return {**base, "rows": [], "total_payment": 0.0}
-    modifiers = _extract_modifiers(cap.get("lines"))
-    rows, total = payment_svc.build_rows(
-        cpts,
-        locality,
-        facility,
-        cf,
-        modifiers=modifiers,
-        cpt_overrides=cpt_overrides,
-        modifier_rules=modifier_rules,
-    )
+    lines = [line for line in (cap.get("lines") or []) if isinstance(line, dict)]
+    if lines:
+        rows, total = payment_svc.build_rows_from_lines(
+            lines,
+            locality,
+            facility,
+            cf,
+            cpt_overrides=cpt_overrides,
+            modifier_rules=modifier_rules,
+        )
+    else:
+        modifiers = _extract_modifiers(lines)
+        rows, total = payment_svc.build_rows(
+            cpts,
+            locality,
+            facility,
+            cf,
+            modifiers=modifiers,
+            cpt_overrides=cpt_overrides,
+            modifier_rules=modifier_rules,
+        )
     return {**base, "rows": rows, "total_payment": round(total, 2)}
 
 
@@ -410,7 +551,7 @@ def _apply_clinician_capture_fields(
     out = {**cap}
     m = str(mrn or "").strip()
     if m:
-        out["mrn"] = m[:64]
+        out["mrn"] = _normalized_mrn_or_none(m)
     p = str(patient_name or "").strip()
     if p:
         out["patient_name"] = p[:255]
@@ -701,7 +842,7 @@ def _apply_pending_scan_result(
     scan.elapsed_secs = round(elapsed, 1)
     scan.service_date = payment_svc.parse_service_date(cap.get("service_date"))
     scan.patient_name = (str(cap.get("patient_name") or "").strip() or None)
-    scan.mrn = (str(cap.get("mrn") or "").strip() or None)
+    scan.mrn = _normalized_mrn_or_none(cap.get("mrn"))
     scan.line_items = json.dumps(enriched)
     scan.scan_status = "verified" if verified else "pending_review"
     scan.main_cpt = main_cpt
@@ -720,6 +861,7 @@ def _apply_pending_scan_result(
         )
     db.commit()
     db.refresh(scan)
+    _persist_ai_runs(db, scan, cap)
     _maybe_fanout_charge_capture_for_other_surgeons(db, scan=scan, cap_lines=cap.get("lines") if isinstance(cap.get("lines"), list) else None)
     return scan
 
@@ -762,7 +904,7 @@ def _persist_capture_result(
         elapsed,
         service_date=payment_svc.parse_service_date(cap.get("service_date")),
         patient_name=cap.get("patient_name"),
-        mrn=cap.get("mrn"),
+        mrn=_normalized_mrn_or_none(cap.get("mrn")),
         line_items_json=json.dumps(enriched),
         image_bytes=image_bytes,
         scan_status="pending_review",
@@ -772,11 +914,12 @@ def _persist_capture_result(
             main_cpt=main_cpt,
             main_cpt_status=main_cpt_status,
             patient_name=cap.get("patient_name"),
-            mrn=cap.get("mrn"),
+            mrn=_normalized_mrn_or_none(cap.get("mrn")),
             service_date=payment_svc.parse_service_date(cap.get("service_date")),
         ),
         client_request_id=client_request_id,
     )
+    _persist_ai_runs(db, scan, cap)
     _maybe_fanout_charge_capture_for_other_surgeons(db, scan=scan, cap_lines=cap.get("lines") if isinstance(cap.get("lines"), list) else None)
     return scan
 
@@ -858,12 +1001,59 @@ def _reconciliation_line_items(lines: list[dict] | None) -> list[dict]:
                 "provider_name": provider_name,
                 "provider_role": provider_role,
                 "is_assist": bool(line.get("is_assist")) or "AS" in modifier or provider_role in ("pa", "assistant"),
+                "line_service_date": str(line.get("line_service_date") or "").strip(),
+                "line_service_datetime_raw": str(line.get("line_service_datetime_raw") or "").strip(),
+                "line_service_time_raw": str(line.get("line_service_time_raw") or "").strip(),
+                "quantity": line.get("quantity"),
+                "raw_row_text": str(line.get("raw_row_text") or "").strip(),
                 "confidence": _line_confidence(line),
                 "source": "ocr_parser",
                 "bbox": None,
             }
         )
     return out
+
+
+def _select_line_items_for_cpts(
+    existing_lines: list[dict] | None,
+    cpts: list[str],
+    modifiers: dict[str, str] | None = None,
+) -> list[dict]:
+    """Preserve one record per visible line item instead of collapsing duplicates by CPT."""
+    if not existing_lines or not cpts:
+        return []
+    requested = [c for c in cpts if re.fullmatch(r"\d{5}", str(c or "").strip())]
+    if not requested:
+        return []
+
+    source_lines = [row for row in existing_lines if isinstance(row, dict)]
+    primary_pool: dict[str, list[dict]] = {}
+    assist_pool: dict[str, list[dict]] = {}
+    for item in source_lines:
+        cpt = str(item.get("cpt") or "").strip()
+        if not re.fullmatch(r"\d{5}", cpt):
+            continue
+        modifier = str(item.get("modifier") or "").strip().upper()
+        is_assist = bool(item.get("is_assist")) or "AS" in modifier or str(item.get("provider_role") or "").strip().lower() in ("pa", "assistant")
+        target = assist_pool if is_assist else primary_pool
+        target.setdefault(cpt, []).append(dict(item))
+
+    merged: list[dict] = []
+    requested_counts = Counter(requested)
+    for cpt in requested:
+        pool = primary_pool.get(cpt) or []
+        existing = pool.pop(0) if pool else {"cpt": cpt, "procedure_name": ""}
+        if modifiers is not None:
+            existing["modifier"] = modifiers.get(cpt, str(existing.get("modifier") or ""))
+            existing["is_assist"] = bool(existing.get("is_assist"))
+        merged.append(existing)
+
+    for cpt, needed in requested_counts.items():
+        extras = assist_pool.get(cpt) or []
+        for extra in extras[:needed]:
+            merged.append(extra)
+
+    return merged
 
 
 def _build_reconciliation_draft(
@@ -945,7 +1135,7 @@ def _run_text_capture(
         if event_cb:
             event_cb("status", "Second pass: checking for more CPT codes…")
         try:
-            extra = cpt_svc.refine_text_additional(raw_text, cap)
+            extra = cpt_svc.refine_text_additional(raw_text, cap, artifact_sink=cap.setdefault("_ai_runs", []))
             cap = RvuCptExtractionService.merge_captures(cap, extra)
         except Exception:
             pass
@@ -1012,7 +1202,7 @@ def _run_vision_capture(
         if event_cb:
             event_cb("status", "Second pass: checking for more CPT codes…")
         try:
-            extra = cpt_svc.refine_vision_additional(image_bytes, cap)
+            extra = cpt_svc.refine_vision_additional(image_bytes, cap, artifact_sink=cap.setdefault("_ai_runs", []))
             cap = RvuCptExtractionService.merge_captures(cap, extra)
         except Exception:
             pass
@@ -1214,16 +1404,26 @@ async def commit_scan(
 
     fac = facility.lower() == "true"
     line_dicts = json.loads(lines)
-    modifiers = _extract_modifiers(line_dicts)
     _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
-    rows, total = payment_svc.build_rows(
-        clean,
-        locality,
-        fac,
-        cf,
-        modifiers=modifiers,
-        cpt_overrides=cpt_overrides,
-        modifier_rules=modifier_rules,
+    rows, total = (
+        payment_svc.build_rows_from_lines(
+            line_dicts,
+            locality,
+            fac,
+            cf,
+            cpt_overrides=cpt_overrides,
+            modifier_rules=modifier_rules,
+        )
+        if line_dicts
+        else payment_svc.build_rows(
+            clean,
+            locality,
+            fac,
+            cf,
+            modifiers=None,
+            cpt_overrides=cpt_overrides,
+            modifier_rules=modifier_rules,
+        )
     )
     loc_name = payment_svc.locality_name(locality)
     enriched = payment_svc.enrich_line_items(rows, line_dicts)
@@ -1262,7 +1462,7 @@ async def commit_scan(
         elapsed_secs,
         service_date=sd,
         patient_name=patient_name,
-        mrn=mrn,
+        mrn=_normalized_mrn_or_none(mrn),
         line_items_json=json.dumps(enriched),
         image_bytes=img_bytes,
     )
@@ -1799,6 +1999,39 @@ def _scan_history_dict(s: RvuScan, surgeon: "RvuStaff | None" = None) -> dict:
         "elapsed_secs": s.elapsed_secs,
         "ocr_elapsed_label": _elapsed_label(s.elapsed_secs),
         "review_reason": _get_scan_review_reason(s),
+        **_scan_financial_summary(s, line_parsed),
+    }
+
+
+def _scan_list_dict(s: RvuScan, surgeon: "RvuStaff | None" = None) -> dict:
+    return {
+        "id": s.id,
+        "scanned_at": _iso_utc(s.scanned_at),
+        "scanned_at_et": _iso_et(s.scanned_at),
+        "scanned_at_label": _label_et(s.scanned_at),
+        "service_date": s.service_date.isoformat() if s.service_date else None,
+        "patient_name": s.patient_name,
+        "mrn": s.mrn,
+        "cpts": s.cpts,
+        "total_rvu": s.total_rvu,
+        "total_payment": s.total_payment,
+        "cf": s.cf,
+        "locality_num": s.locality_num,
+        "locality_name": s.locality_name,
+        "facility": s.facility,
+        "ai_model": s.ai_model,
+        "has_image": _stored_binary_usable(s.image_data),
+        "scan_status": s.scan_status or "verified",
+        "status_label": _scan_status_label(s),
+        "main_cpt": s.main_cpt,
+        "main_cpt_status": s.main_cpt_status,
+        "surgeon_id": s.surgeon_id,
+        "surgeon_name": getattr(surgeon, "full_name", None) if surgeon else None,
+        "staff_type": getattr(surgeon, "staff_type", None) if surgeon else None,
+        "elapsed_secs": s.elapsed_secs,
+        "ocr_elapsed_label": _elapsed_label(s.elapsed_secs),
+        "review_reason": _get_scan_review_reason(s),
+        **_scan_financial_summary(s),
     }
 
 
@@ -2334,18 +2567,30 @@ def patch_scan(
     fac = body.facility if body.facility is not None else bool(scan.facility)
     cf_val = body.cf if body.cf is not None else (scan.cf or APP_CF_DEFAULT)
     _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+    existing_lines = _parse_line_items(scan.line_items)
     if clean:
-        rows, total = payment_svc.build_rows(
-            clean,
-            locality,
-            fac,
-            cf_val,
-            modifiers=body.modifiers,
-            cpt_overrides=cpt_overrides,
-            modifier_rules=modifier_rules,
+        line_source = _select_line_items_for_cpts(existing_lines, clean, body.modifiers)
+        rows, total = (
+            payment_svc.build_rows_from_lines(
+                line_source,
+                locality,
+                fac,
+                cf_val,
+                cpt_overrides=cpt_overrides,
+                modifier_rules=modifier_rules,
+            )
+            if line_source
+            else payment_svc.build_rows(
+                clean,
+                locality,
+                fac,
+                cf_val,
+                modifiers=body.modifiers,
+                cpt_overrides=cpt_overrides,
+                modifier_rules=modifier_rules,
+            )
         )
-        existing_lines = _parse_line_items(scan.line_items)
-        enriched = payment_svc.enrich_line_items(rows, existing_lines)
+        enriched = payment_svc.enrich_line_items(rows, line_source)
         total_rvu = round(sum(r["total_rvu"] for r in rows), 4)
         total_payment = round(total, 2)
         main_cpt = clean[0]
@@ -2365,7 +2610,7 @@ def patch_scan(
     if body.patient_name is not None:
         scan.patient_name = body.patient_name[:255] if body.patient_name else None
     if body.mrn is not None:
-        scan.mrn = body.mrn[:64] if body.mrn else None
+        scan.mrn = _normalized_mrn_or_none(body.mrn)
     scan.locality_num = locality
     scan.locality_name = payment_svc.locality_name(locality)
     scan.facility = fac
@@ -2720,31 +2965,85 @@ def portal_patch_modifier_rule_endpoint(
 def portal_all_scans(
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin_api),
-    limit: int = 500,
+    limit: int = 100,
+    offset: int = 0,
 ):
-    limit = min(max(limit, 1), 1000)
-    scans = db.query(RvuScan).order_by(desc(RvuScan.scanned_at)).limit(limit).all()
-    out = []
-    for s in scans:
-        sur = db.get(RvuStaff, s.surgeon_id)
-        row = _scan_history_dict(s)
-        row["surgeon_id"] = s.surgeon_id
-        row["surgeon_name"] = sur.full_name if sur else None
-        row["staff_type"] = sur.staff_type if sur else None
-        out.append(row)
-    return {"scans": out}
+    limit = min(max(limit, 1), 250)
+    offset = max(offset, 0)
+    total_count = db.query(func.count(RvuScan.id)).scalar() or 0
+    rows = (
+        db.query(RvuScan, RvuStaff)
+        .outerjoin(RvuStaff, RvuStaff.id == RvuScan.surgeon_id)
+        .order_by(desc(RvuScan.scanned_at))
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    scans = [_scan_list_dict(scan, surgeon) for scan, surgeon in rows]
+    return {
+        "scans": scans,
+        "limit": limit,
+        "offset": offset,
+        "total_count": total_count,
+        "has_more": (offset + len(scans)) < total_count,
+    }
+
+
+@portal_router.get("/scans/{scan_id}")
+def portal_scan_detail(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    _admin=Depends(get_current_admin_api),
+):
+    row = (
+        db.query(RvuScan, RvuStaff)
+        .outerjoin(RvuStaff, RvuStaff.id == RvuScan.surgeon_id)
+        .filter(RvuScan.id == scan_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    scan, surgeon = row
+    detail = _scan_history_dict(scan, surgeon)
+    detail["surgeon_id"] = scan.surgeon_id
+    return detail
+
+
+@portal_router.get("/scans/{scan_id}/ai-runs")
+def portal_scan_ai_runs(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    _admin=Depends(get_current_admin_api),
+):
+    scan = db.get(RvuScan, scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    runs = (
+        db.query(RvuScanAiRun)
+        .filter(RvuScanAiRun.scan_id == scan_id)
+        .order_by(RvuScanAiRun.sequence_num.asc(), RvuScanAiRun.id.asc())
+        .all()
+    )
+    return {"scan_id": scan_id, "ai_runs": [_scan_ai_run_dict(run) for run in runs]}
 
 
 @portal_router.get("/scans/{scan_id}/image")
 def portal_scan_image(
     scan_id: int,
+    thumb: bool = False,
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin_api),
 ):
     scan = db.get(RvuScan, scan_id)
     if not scan or not _stored_binary_usable(scan.image_data):
         raise HTTPException(status_code=404, detail="No image for this scan")
-    return _binary_image_response(scan.image_data)
+    data = scan.image_data
+    if thumb:
+        try:
+            data = cpt_svc.shrink_image(scan.image_data, max_dim=160)
+        except Exception:
+            data = scan.image_data
+    return _binary_image_response(data)
 
 
 class ScanPatch(BaseModel):
@@ -2775,7 +3074,7 @@ def portal_patch_scan(
     if body.patient_name is not None:
         scan.patient_name = body.patient_name[:255] if body.patient_name else None
     if body.mrn is not None:
-        scan.mrn = body.mrn[:64] if body.mrn else None
+        scan.mrn = _normalized_mrn_or_none(body.mrn)
     if body.locality_num is not None:
         scan.locality_num = body.locality_num
     if body.locality_name is not None:
@@ -2819,40 +3118,34 @@ def portal_patch_scan(
             except json.JSONDecodeError:
                 existing_lines = []
 
-        modifiers = (
-            body.modifiers
-            if body.modifiers is not None
-            else _extract_modifiers(existing_lines)
-        )
         clean = current_cpts or []
         if clean:
             _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
-            rows, total = payment_svc.build_rows(
-                clean,
-                scan.locality_num or "00",
-                scan.facility or False,
-                scan.cf or APP_CF_DEFAULT,
-                modifiers=modifiers,
-                cpt_overrides=cpt_overrides,
-                modifier_rules=modifier_rules,
+            modifiers = (
+                body.modifiers
+                if body.modifiers is not None
+                else _extract_modifiers(existing_lines)
             )
-            line_lookup = {str(item.get("cpt") or "").strip(): item for item in existing_lines}
-            merged_lines: list[dict] = []
-            for cpt in clean:
-                existing = dict(line_lookup.get(cpt) or {})
-                if not existing:
-                    existing = {"cpt": cpt, "procedure_name": ""}
-                if body.modifiers is not None:
-                    existing["modifier"] = modifiers.get(cpt, "")
-                    existing["is_assist"] = bool(existing.get("is_assist"))
-                merged_lines.append(existing)
-            assist_lines = [
-                item for item in existing_lines
-                if bool(item.get("is_assist")) or "AS" in str(item.get("modifier") or "").upper()
-            ]
-            merged_lines.extend(
-                item for item in assist_lines
-                if str(item.get("cpt") or "").strip() in clean
+            merged_lines = _select_line_items_for_cpts(existing_lines, clean, modifiers if body.modifiers is not None else None)
+            rows, total = (
+                payment_svc.build_rows_from_lines(
+                    merged_lines,
+                    scan.locality_num or "00",
+                    scan.facility or False,
+                    scan.cf or APP_CF_DEFAULT,
+                    cpt_overrides=cpt_overrides,
+                    modifier_rules=modifier_rules,
+                )
+                if merged_lines
+                else payment_svc.build_rows(
+                    clean,
+                    scan.locality_num or "00",
+                    scan.facility or False,
+                    scan.cf or APP_CF_DEFAULT,
+                    modifiers=modifiers,
+                    cpt_overrides=cpt_overrides,
+                    modifier_rules=modifier_rules,
+                )
             )
             scan.total_rvu = round(sum(r.get("total_rvu", 0) for r in rows), 2)
             scan.total_payment = round(total, 2)
@@ -2887,6 +3180,7 @@ def portal_delete_scan(
     scan = db.get(RvuScan, scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    db.query(RvuScanAiRun).filter(RvuScanAiRun.scan_id == scan_id).delete(synchronize_session=False)
     db.delete(scan)
     db.commit()
 

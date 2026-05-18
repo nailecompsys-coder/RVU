@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import inspect, text
+from sqlalchemy import Connection, inspect, text
 
 # Register RVU-owned identity ORM + RVU business models
 from app import models_identity  # noqa: F401
@@ -34,38 +34,49 @@ _DIST = os.environ.get("RVU_STATIC_DIST") or os.path.abspath(
 )
 
 
-def _ensure_rvu_schema() -> None:
-    inspector = inspect(engine)
+_SCHEMA_INIT_LOCK_ID = 3045121101
+
+
+def _ensure_rvu_schema(conn: Connection) -> None:
+    inspector = inspect(conn)
     if not inspector.has_table("rvu_scans"):
         return
     columns = {col["name"] for col in inspector.get_columns("rvu_scans")}
-    with engine.begin() as conn:
-        if "patient_name" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS patient_name VARCHAR(255)"))
-        if "scan_status" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS scan_status VARCHAR(32) DEFAULT 'verified'"))
-        if "main_cpt" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS main_cpt VARCHAR(32)"))
-        if "main_cpt_status" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS main_cpt_status VARCHAR(16)"))
-        if "review_reason" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS review_reason VARCHAR(255)"))
-        if "client_request_id" not in columns:
-            conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS client_request_id VARCHAR(128)"))
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_rvu_scans_surgeon_request_id "
-                "ON rvu_scans (surgeon_id, client_request_id)"
-            )
+    if "patient_name" not in columns:
+        conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS patient_name VARCHAR(255)"))
+    if "scan_status" not in columns:
+        conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS scan_status VARCHAR(32) DEFAULT 'verified'"))
+    if "main_cpt" not in columns:
+        conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS main_cpt VARCHAR(32)"))
+    if "main_cpt_status" not in columns:
+        conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS main_cpt_status VARCHAR(16)"))
+    if "review_reason" not in columns:
+        conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS review_reason VARCHAR(255)"))
+    if "client_request_id" not in columns:
+        conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS client_request_id VARCHAR(128)"))
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_rvu_scans_surgeon_request_id "
+            "ON rvu_scans (surgeon_id, client_request_id)"
         )
-        conn.execute(text("UPDATE rvu_scans SET scan_status = 'verified' WHERE scan_status IS NULL"))
+    )
+    conn.execute(text("UPDATE rvu_scans SET scan_status = 'verified' WHERE scan_status IS NULL"))
+
+
+def _initialize_schema_once() -> None:
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": _SCHEMA_INIT_LOCK_ID})
+        try:
+            Base.metadata.create_all(bind=conn, checkfirst=True)
+            _ensure_rvu_schema(conn)
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _SCHEMA_INIT_LOCK_ID})
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Tables may already exist; create_all is safe with checkfirst
-    Base.metadata.create_all(bind=engine, checkfirst=True)
-    _ensure_rvu_schema()
+    _initialize_schema_once()
     yield
 
 

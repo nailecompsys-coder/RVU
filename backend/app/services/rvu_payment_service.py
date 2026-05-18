@@ -70,6 +70,61 @@ class RvuPaymentService:
         total = round(sum(float(row.get("payment") or 0) for row in rows), 2)
         return rows, total
 
+    def build_rows_from_lines(
+        self,
+        lines: list[dict[str, Any]],
+        locality: str,
+        facility: bool,
+        cf: float,
+        *,
+        cpt_overrides: dict[str, RvuRow] | None = None,
+        modifier_rules: dict[str, dict[str, object]] | None = None,
+    ) -> tuple[list[dict[str, Any]], float]:
+        rows: list[dict[str, Any]] = []
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            cpt = str(line.get("cpt") or "").strip()
+            if not re.fullmatch(r"\d{5}", cpt):
+                continue
+            modifier = str(line.get("modifier") or "").strip().upper()
+            role = str(line.get("provider_role") or "").strip().lower()
+            is_assist = bool(line.get("is_assist")) or role in ("pa", "assistant") or "AS" in modifier
+            if is_assist:
+                continue
+            r = calc_payment(
+                cpt,
+                locality,
+                facility,
+                cf,
+                modifier=modifier,
+                rvu_override=(cpt_overrides or {}).get(cpt),
+                modifier_rules=modifier_rules,
+            )
+            row = r.to_dict()
+            row["multiple_procedure_factor"] = 1.0
+            rows.append(row)
+        ranked_indexes = [
+            idx for idx, row in enumerate(rows)
+            if "AS" not in str(row.get("modifier") or "").upper()
+        ]
+        ranked_indexes.sort(key=lambda idx: float(rows[idx].get("work_rvu") or 0), reverse=True)
+        if len(ranked_indexes) > 1:
+            for idx in ranked_indexes[1:]:
+                row = rows[idx]
+                factor = 0.5
+                row["multiple_procedure_factor"] = factor
+                row["work_rvu"] = round(float(row.get("work_rvu") or 0) * factor, 2)
+                row["pe_rvu"] = round(float(row.get("pe_rvu") or 0) * factor, 2)
+                row["mp_rvu"] = round(float(row.get("mp_rvu") or 0) * factor, 2)
+                row["total_rvu"] = round(float(row.get("total_rvu") or 0) * factor, 2)
+                row["work_payment"] = round(float(row.get("work_payment") or 0) * factor, 2)
+                row["pe_payment"] = round(float(row.get("pe_payment") or 0) * factor, 2)
+                row["mp_payment"] = round(float(row.get("mp_payment") or 0) * factor, 2)
+                row["payment"] = round(float(row.get("payment") or 0) * factor, 2)
+        total = round(sum(float(row.get("payment") or 0) for row in rows), 2)
+        return rows, total
+
     def locality_name(self, locality: str) -> str:
         locs = get_localities()
         return next((l.locality_name for l in locs if l.locality_num == locality), locality)
@@ -139,6 +194,10 @@ class RvuPaymentService:
                                 "provider_role": "surgeon",
                                 "modifier": clean_modifier,
                                 "line_service_date": line_sd,
+                                "line_service_datetime_raw": str(L.get("line_service_datetime_raw") or "").strip(),
+                                "line_service_time_raw": str(L.get("line_service_time_raw") or "").strip(),
+                                "quantity": L.get("quantity"),
+                                "raw_row_text": str(L.get("raw_row_text") or "").strip(),
                             }
                         )
         out: list[dict[str, Any]] = []
@@ -161,11 +220,19 @@ class RvuPaymentService:
                 prole = str(picked.get("provider_role") or "surgeon") or "surgeon"
                 pmod = str(picked.get("modifier") or "")
                 line_sd = picked.get("line_service_date")
+                line_dt_raw = str(picked.get("line_service_datetime_raw") or "").strip()
+                line_time_raw = str(picked.get("line_service_time_raw") or "").strip()
+                quantity = picked.get("quantity")
+                raw_row_text = str(picked.get("raw_row_text") or "").strip()
             else:
                 pname = meta.get("provider_name", "") or fallback_surgeon_name
                 prole = meta.get("provider_role", "surgeon") or "surgeon"
                 pmod = meta.get("modifier", "")
                 line_sd = None
+                line_dt_raw = ""
+                line_time_raw = ""
+                quantity = None
+                raw_row_text = ""
             out_line: dict[str, Any] = {
                 "cpt": cpt,
                 "procedure_name": proc,
@@ -193,6 +260,14 @@ class RvuPaymentService:
             }
             if line_sd:
                 out_line["line_service_date"] = line_sd
+            if line_dt_raw:
+                out_line["line_service_datetime_raw"] = line_dt_raw
+            if line_time_raw:
+                out_line["line_service_time_raw"] = line_time_raw
+            if quantity not in (None, ""):
+                out_line["quantity"] = quantity
+            if raw_row_text:
+                out_line["raw_row_text"] = raw_row_text
             out.append(out_line)
         # Keep assistant/PA lines from OCR/text for auditing, but do not add to surgeon payment totals.
         if lines:
@@ -226,6 +301,14 @@ class RvuPaymentService:
                 }
                 if assist_sd:
                     assist_row["line_service_date"] = assist_sd
+                if str(L.get("line_service_datetime_raw") or "").strip():
+                    assist_row["line_service_datetime_raw"] = str(L.get("line_service_datetime_raw") or "").strip()
+                if str(L.get("line_service_time_raw") or "").strip():
+                    assist_row["line_service_time_raw"] = str(L.get("line_service_time_raw") or "").strip()
+                if str(L.get("raw_row_text") or "").strip():
+                    assist_row["raw_row_text"] = str(L.get("raw_row_text") or "").strip()
+                if L.get("quantity") not in (None, ""):
+                    assist_row["quantity"] = L.get("quantity")
                 out.append(assist_row)
         # If OCR missed explicit AS but PA is present in row text, synthesize an audit assist row.
         if lines:
@@ -303,6 +386,10 @@ class RvuPaymentService:
                 return f"{y:04d}-{mo:02d}-{d:02d}"
             except ValueError:
                 return None
+        # Embedded date inside a larger timestamp/text value like "5/11/2026 10:43 AM"
+        m = re.search(r"(\d{1,2}[/-]\d{1,2}[/-]\d{4})", t)
+        if m and m.group(1) != t:
+            return RvuPaymentService.coerce_service_date_iso(m.group(1))
         return None
 
     @staticmethod

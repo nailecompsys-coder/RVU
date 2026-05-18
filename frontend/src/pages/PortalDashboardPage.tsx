@@ -4,6 +4,7 @@ import {
   api,
   type DeviceRecord,
   type PortalMe,
+  type PortalScanAiRun,
   type PortalScanRow,
   type ScanPatchBody,
   type StaffCreateBody,
@@ -15,6 +16,7 @@ import PortalUsersPanel from "../components/PortalUsersPanel";
 import { fmtCalendarDateMdY, fmtDateTimeEt } from "../dates";
 
 type Tab = "scans" | "staff" | "devices" | "opnotes" | "settings";
+const SCAN_PAGE_SIZE = 100;
 
 const fmt$ = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
@@ -74,11 +76,13 @@ type LineItem = {
 
 function parseLineItems(scan: PortalScanRow): LineItem[] {
   const raw = (scan.line_items as unknown) ?? scan.cpts ?? [];
-  if (Array.isArray(raw)) return raw as LineItem[];
+  if (Array.isArray(raw)) return raw.filter((item): item is LineItem => typeof item === "object" && item !== null);
   if (typeof raw === "string") {
     try {
       const parsed = JSON.parse(raw) as unknown;
-      return Array.isArray(parsed) ? (parsed as LineItem[]) : [];
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is LineItem => typeof item === "object" && item !== null)
+        : [];
     } catch {
       return [];
     }
@@ -88,6 +92,17 @@ function parseLineItems(scan: PortalScanRow): LineItem[] {
 
 function financialBreakdown(scan: PortalScanRow) {
   const items = parseLineItems(scan);
+  if (!items.length) {
+    return {
+      items,
+      workRvu: Number(scan.work_rvu ?? 0),
+      surgeonValue: Number(scan.surgeon_value ?? 0),
+      facilityShare: Number(scan.facility_share ?? 0),
+      totalPayment: Number(scan.total_payment ?? 0),
+      assistCount: Number(scan.assist_count ?? 0),
+      cptCount: Number(scan.cpt_count ?? 0),
+    };
+  }
   const surgeonItems = items.filter((li) => !li.is_assist && !/\bAS\b/i.test(li.modifier ?? ""));
   const workRvu = surgeonItems.reduce((a, li) => a + Number(li.work_rvu ?? 0), 0);
   const cf = Number(scan.cf ?? 32.3465);
@@ -106,7 +121,20 @@ function financialBreakdown(scan: PortalScanRow) {
     facilityShare,
     totalPayment,
     assistCount,
+    cptCount: items.length,
   };
+}
+
+function prettyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function isPrimaryOcrRun(run: PortalScanAiRun): boolean {
+  return run.stage === "vision_primary" || run.stage === "text_primary";
 }
 
 // ── Inline edit row ────────────────────────────────────────────────────────────
@@ -118,9 +146,10 @@ interface EditRowProps {
   onSave: () => void;
   onCancel: () => void;
   colCount: number;
+  mode?: "edit" | "add";
 }
 
-function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount }: EditRowProps) {
+function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount, mode = "edit" }: EditRowProps) {
   const rawCpts = (() => {
     try { return (JSON.parse(scan.cpts as string ?? "[]") as string[]).join(", "); }
     catch { return ""; }
@@ -156,8 +185,9 @@ function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount }: 
             </select>
           </div>
           <div className="flex-[2_1_200px] min-w-[160px]">
-            <label className="label">CPTs (comma-separated)</label>
+            <label className="label">{mode === "add" ? "Add CPTs (comma-separated)" : "CPTs (comma-separated)"}</label>
             <input type="text" className="input text-xs" placeholder="e.g. 27447, 00400"
+              autoFocus={mode === "add"}
               value={cptsText}
               onChange={(e) => {
                 setCptsText(e.target.value);
@@ -182,9 +212,12 @@ function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount }: 
 export default function PortalDashboardPage() {
   const nav = useNavigate();
   const [admin, setAdmin] = useState<PortalMe | null>(null);
+  const [bootLoading, setBootLoading] = useState(true);
   const [scans, setScans] = useState<PortalScanRow[]>([]);
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
+  const [staffLoaded, setStaffLoaded] = useState(false);
+  const [devicesLoaded, setDevicesLoaded] = useState(false);
   const [tab, setTab] = useState<Tab>("scans");
 
   const [filterSurgeon, setFilterSurgeon] = useState("all");
@@ -193,20 +226,20 @@ export default function PortalDashboardPage() {
   const [filterFacility, setFilterFacility] = useState("all");
 
   const [imageModal, setImageModal] = useState<number | null>(null);
+  const [imageLoading, setImageLoading] = useState(false);
   const [detailScan, setDetailScan] = useState<PortalScanRow | null>(null);
+  const [detailLoadingId, setDetailLoadingId] = useState<number | null>(null);
+  const [ocrReviewScan, setOcrReviewScan] = useState<PortalScanRow | null>(null);
+  const [ocrReviewRuns, setOcrReviewRuns] = useState<PortalScanAiRun[]>([]);
+  const [ocrReviewLoadingId, setOcrReviewLoadingId] = useState<number | null>(null);
   const [togglingDevice, setTogglingDevice] = useState<number | null>(null);
 
   const [editId, setEditId] = useState<number | null>(null);
+  const [editMode, setEditMode] = useState<"edit" | "add">("edit");
   const [editDraft, setEditDraft] = useState<ScanPatchBody>({});
   const [savingId, setSavingId] = useState<number | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
-
-  const [sending, setSending] = useState<number | null>(null);
-  const [sendErr, setSendErr] = useState<Record<number, string>>({});
-  type QrResult = { surgeon: string; email: string | null; magic_url: string; qr_b64: string; emailed: boolean };
-  const [qrModal, setQrModal] = useState<QrResult | null>(null);
-  const [copied, setCopied] = useState(false);
 
   const [staffEditId, setStaffEditId] = useState<number | null>(null);
   const [staffDraft, setStaffDraft] = useState<StaffPatchBody>({});
@@ -226,19 +259,53 @@ export default function PortalDashboardPage() {
   const defaultModelForProvider = (p: string) =>
     p === "openai" ? "gpt-4o-mini" : p === "anthropic" ? "claude-3-5-sonnet-latest" : p === "paddle" ? "paddleocr" : "qwen2.5vl:7b";
 
+  const loadAllPortalScans = async (): Promise<PortalScanRow[]> => {
+    let offset = 0;
+    const all: PortalScanRow[] = [];
+    for (;;) {
+      const page = await api.portalScans(SCAN_PAGE_SIZE, offset);
+      all.push(...page.scans);
+      if (!page.has_more || page.scans.length === 0) break;
+      offset += page.scans.length;
+    }
+    return all;
+  };
+
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.mePortal(), api.portalScans(), api.adminStaff(), api.listDevices()])
-      .then(([a, s, st, dv]) => {
+    setBootLoading(true);
+    Promise.all([api.mePortal(), loadAllPortalScans()])
+      .then(([a, s]) => {
         if (cancelled) return;
         setAdmin(a);
-        setScans(s.scans);
-        setStaff(st.staff.slice().sort(sortStaffMembers));
-        setDevices(dv.devices);
+        setScans(s);
       })
-      .catch(() => { if (!cancelled) nav("/portal/login"); });
+      .catch(() => { if (!cancelled) nav("/portal/login"); })
+      .finally(() => {
+        if (!cancelled) setBootLoading(false);
+      });
     return () => { cancelled = true; };
   }, [nav]);
+
+  useEffect(() => {
+    if (!admin) return;
+    if (tab === "staff" && !staffLoaded) {
+      void api.adminStaff()
+        .then((st) => {
+          setStaff(st.staff.slice().sort(sortStaffMembers));
+          setStaffLoaded(true);
+        })
+        .catch(() => {});
+    }
+    if (tab === "devices" && !devicesLoaded) {
+      void api.listDevices()
+        .then((dv) => {
+          setDevices(dv.devices);
+          setDevicesLoaded(true);
+        })
+        .catch(() => {});
+    }
+  }, [admin, tab, staffLoaded, devicesLoaded]);
 
   useEffect(() => {
     if (!admin || admin.role !== "superadmin") return;
@@ -256,16 +323,52 @@ export default function PortalDashboardPage() {
     nav("/portal/login");
   };
 
-  const startEdit = (s: PortalScanRow) => { setDeleteConfirmId(null); setEditId(s.id); setEditDraft({}); };
-  const cancelEdit = () => { setEditId(null); setEditDraft({}); };
+  const openScanImage = (id: number) => {
+    setImageLoading(true);
+    setImageModal(id);
+  };
+
+  const closeScanImage = () => {
+    setImageModal(null);
+    setImageLoading(false);
+  };
+
+  const openScanDetails = async (id: number) => {
+    setDetailLoadingId(id);
+    try {
+      const detail = await api.portalScanDetail(id);
+      setDetailScan(detail);
+    } catch (e: unknown) {
+      alert("Could not load scan details: " + (e instanceof Error ? e.message : "unknown error"));
+    } finally {
+      setDetailLoadingId(null);
+    }
+  };
+
+  const openOcrReview = async (scan: PortalScanRow) => {
+    setOcrReviewLoadingId(scan.id);
+    try {
+      const res = await api.portalScanAiRuns(scan.id);
+      setOcrReviewScan(scan);
+      setOcrReviewRuns(res.ai_runs);
+    } catch (e: unknown) {
+      alert("Could not load OCR results: " + (e instanceof Error ? e.message : "unknown error"));
+    } finally {
+      setOcrReviewLoadingId(null);
+    }
+  };
+
+  const startEdit = (s: PortalScanRow) => { setDeleteConfirmId(null); setEditMode("edit"); setEditId(s.id); setEditDraft({}); };
+  const startAdd = (s: PortalScanRow) => { setDeleteConfirmId(null); setEditMode("add"); setEditId(s.id); setEditDraft({}); };
+  const cancelEdit = () => { setEditId(null); setEditMode("edit"); setEditDraft({}); };
 
   const saveEdit = async (id: number) => {
     if (!Object.keys(editDraft).length) { cancelEdit(); return; }
     setSavingId(id);
-    try {
-      const updated = await api.patchScan(id, editDraft);
-      setScans((prev) => prev.map((s) => (s.id === id ? { ...s, ...updated } : s)));
-      setEditId(null); setEditDraft({});
+      try {
+        const updated = await api.patchScan(id, editDraft);
+        setScans((prev) => prev.map((s) => (s.id === id ? { ...s, ...updated } : s)));
+      setEditId(null); setEditMode("edit"); setEditDraft({});
     } catch (e: unknown) {
       alert("Save failed: " + (e instanceof Error ? e.message : "unknown error"));
     } finally { setSavingId(null); }
@@ -282,37 +385,38 @@ export default function PortalDashboardPage() {
     } finally { setDeletingId(null); }
   };
 
-  const filtered = useMemo(() => scans.filter((s) => {
-    if (filterSurgeon !== "all" && String(s.surgeon_id) !== filterSurgeon) return false;
-    const dateKey = s.service_date ?? s.scanned_at?.slice(0, 10) ?? "";
-    if (filterFrom && dateKey < filterFrom) return false;
-    if (filterTo   && dateKey > filterTo)   return false;
-    if (filterFacility === "fac"    && !s.facility) return false;
-    if (filterFacility === "nonfac" &&  s.facility) return false;
-    return true;
-  }), [scans, filterSurgeon, filterFrom, filterTo, filterFacility]);
+  const filteredRows = useMemo(() => {
+    return scans
+      .filter((s) => {
+        if (filterSurgeon !== "all" && String(s.surgeon_id) !== filterSurgeon) return false;
+        const dateKey = s.service_date ?? s.scanned_at?.slice(0, 10) ?? "";
+        if (filterFrom && dateKey < filterFrom) return false;
+        if (filterTo && dateKey > filterTo) return false;
+        if (filterFacility === "fac" && !s.facility) return false;
+        if (filterFacility === "nonfac" && s.facility) return false;
+        return true;
+      })
+      .map((scan) => ({ scan, fin: financialBreakdown(scan) }));
+  }, [scans, filterSurgeon, filterFrom, filterTo, filterFacility]);
 
-  const totalRvu = filtered.reduce((a, s) => a + (s.total_rvu ?? 0), 0);
-  const totalPay = filtered.reduce((a, s) => a + (s.total_payment ?? 0), 0);
-  const totalWorkRvu = filtered.reduce((a, s) => a + financialBreakdown(s).workRvu, 0);
-  const totalSurgeonValue = filtered.reduce((a, s) => a + financialBreakdown(s).surgeonValue, 0);
-  const totalFacilityValue = filtered.reduce((a, s) => a + financialBreakdown(s).facilityShare, 0);
-  const uniqueStaff = new Set(filtered.map((s) => s.surgeon_id)).size;
+  const filtered = filteredRows.map(({ scan }) => scan);
+  const totalRvu = filteredRows.reduce((a, { scan }) => a + (scan.total_rvu ?? 0), 0);
+  const totalPay = filteredRows.reduce((a, { scan }) => a + (scan.total_payment ?? 0), 0);
+  const totalWorkRvu = filteredRows.reduce((a, { fin }) => a + fin.workRvu, 0);
+  const totalSurgeonValue = filteredRows.reduce((a, { fin }) => a + fin.surgeonValue, 0);
+  const totalFacilityValue = filteredRows.reduce((a, { fin }) => a + fin.facilityShare, 0);
+  const uniqueStaff = new Set(filteredRows.map(({ scan }) => scan.surgeon_id)).size;
 
   const downloadScanReport = () => {
     const head = ["Scanned", "DOS", "Staff", "Role", "Setting", "CPT Count", "Total RVU", "wRVU", "Value$", "Facility$", "Total Payment", "AS Assist Lines"];
-    const rows = filtered.map((s) => {
-      const fin = financialBreakdown(s);
-      const cptCount = (() => {
-        return fin.items.length;
-      })();
+    const rows = filteredRows.map(({ scan: s, fin }) => {
       return [
         fmtDateTimeEt(s.scanned_at),
         fmtCalendarDateMdY(s.service_date),
         s.surgeon_name ?? "",
         s.staff_type ?? "",
         s.facility ? "Facility" : "Non-Facility",
-        String(cptCount),
+        String(fin.cptCount),
         (s.total_rvu ?? 0).toFixed(2),
         fin.workRvu.toFixed(2),
         fin.surgeonValue.toFixed(2),
@@ -347,28 +451,9 @@ export default function PortalDashboardPage() {
     return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
   }, [scans]);
 
-  const sendLink = async (id: number) => {
-    setSending(id);
-    setSendErr((p) => { const n = { ...p }; delete n[id]; return n; });
-    try {
-      const r = await api.sendMagicLink(id);
-      setQrModal(r); setCopied(false);
-    } catch (e: unknown) {
-      setSendErr((p) => ({ ...p, [id]: e instanceof Error ? e.message : "Failed" }));
-    } finally { setSending(null); }
-  };
-
-  const copyLink = () => {
-    if (!qrModal) return;
-    void navigator.clipboard.writeText(qrModal.magic_url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    });
-  };
-
   const startStaffEdit = (s: StaffMember) => {
     setShowAddForm(false); setStaffEditId(s.id);
-    setStaffDraft({ first_name: s.first_name, last_name: s.last_name, suffix: s.suffix ?? "", staff_type: s.staff_type ?? "physician", email: s.email ?? "", is_active: s.is_active });
+    setStaffDraft({ first_name: s.first_name, last_name: s.last_name, suffix: s.suffix ?? "", staff_type: s.staff_type ?? "physician", email: s.email ?? "", phone: s.phone ?? "", is_active: s.is_active });
     setStaffErr(null);
   };
 
@@ -392,7 +477,7 @@ export default function PortalDashboardPage() {
     try {
       const created = await api.createStaff(addDraft);
       setStaff((prev) => [...prev, created].sort(sortStaffMembers));
-      setShowAddForm(false); setAddDraft({ first_name: "", last_name: "" });
+      setShowAddForm(false); setAddDraft({ first_name: "", last_name: "", phone: "" });
     } catch (e: unknown) {
       setAddErr(e instanceof Error ? e.message : "Failed to add staff");
     } finally { setAddSaving(false); }
@@ -406,7 +491,16 @@ export default function PortalDashboardPage() {
     } catch { /* ignore */ } finally { setTogglingDevice(null); }
   };
 
-  if (!admin) return null;
+  if (bootLoading || !admin) {
+    return (
+      <div className="min-h-dvh bg-surface-soft flex items-center justify-center">
+        <div className="card px-5 py-4 flex items-center gap-3 text-sm text-ink-secondary">
+          <Spinner />
+          Loading portal scans...
+        </div>
+      </div>
+    );
+  }
 
   const COL_COUNT = 12;
 
@@ -543,9 +637,7 @@ export default function PortalDashboardPage() {
                         </td>
                       </tr>
                     )}
-                    {filtered.map((s) => {
-                      const fin = financialBreakdown(s);
-                      const cptCount = fin.items.length;
+                    {filteredRows.map(({ scan: s, fin }) => {
                       const isEditing = editId === s.id;
                       const isDeleteConfirm = deleteConfirmId === s.id;
                       const isDeleting = deletingId === s.id;
@@ -558,12 +650,18 @@ export default function PortalDashboardPage() {
                           {/* Thumbnail */}
                           <td className="px-2 py-2 w-11">
                             {s.has_image ? (
-                              <img
-                                src={`/api/v1/portal/rvu/scans/${s.id}/image`}
-                                alt="scan"
-                                onClick={() => setImageModal(s.id)}
-                                className="w-9 h-9 object-cover rounded-lg cursor-zoom-in border border-brand-border"
-                              />
+                              <button
+                                type="button"
+                                onClick={() => openScanImage(s.id)}
+                                className="w-9 h-9 rounded-lg bg-surface-soft border border-brand-border flex items-center justify-center hover:bg-surface cursor-zoom-in"
+                                title="Open scan image"
+                              >
+                                <svg className="w-4 h-4 text-brand-blue" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                                  <path strokeLinecap="round" strokeLinejoin="round"
+                                    d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                                </svg>
+                              </button>
                             ) : (
                               <div className="w-9 h-9 rounded-lg bg-surface-soft border border-brand-border flex items-center justify-center">
                                 <svg className="w-4 h-4 text-brand-border" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -586,7 +684,7 @@ export default function PortalDashboardPage() {
                               ? <span className="badge-blue">Facility</span>
                               : <span className="badge-green">Non-Fac</span>}
                           </td>
-                          <td className={`${TD} text-xs text-ink-secondary`}>{cptCount}</td>
+                          <td className={`${TD} text-xs text-ink-secondary`}>{fin.cptCount}</td>
                           <td className={`${TD} text-right font-mono tabular-nums text-sm`}>{(s.total_rvu ?? 0).toFixed(2)}</td>
                           <td className={`${TD} text-right font-mono tabular-nums text-sm`}>{fmt$(fin.facilityShare)}</td>
                           <td className={`${TD} text-right font-bold text-green-700 font-mono tabular-nums text-sm`}>{fmt$(s.total_payment ?? 0)}</td>
@@ -606,17 +704,33 @@ export default function PortalDashboardPage() {
                                 >No</button>
                               </span>
                             ) : (
-                              <span className="inline-flex gap-2">
-                                <button onClick={() => setDetailScan(s)} className="text-ink text-xs font-semibold border border-brand-border rounded-lg px-2.5 py-1 hover:bg-surface-soft transition-colors">
-                                  Details
+                              <div className="inline-flex flex-col items-end gap-2">
+                                <span className="inline-flex gap-2">
+                                  <button
+                                    onClick={() => void openScanDetails(s.id)}
+                                    disabled={detailLoadingId === s.id}
+                                    className="text-ink text-xs font-semibold border border-brand-border rounded-lg px-2.5 py-1 hover:bg-surface-soft transition-colors disabled:opacity-60"
+                                  >
+                                    {detailLoadingId === s.id ? <Spinner className="w-3 h-3" /> : "Details"}
+                                  </button>
+                                  <button onClick={() => startAdd(s)} className="text-emerald-700 text-xs font-semibold border border-emerald-200 rounded-lg px-2.5 py-1 hover:bg-emerald-50 transition-colors">
+                                    Add
+                                  </button>
+                                  <button onClick={() => startEdit(s)} className="text-indigo-600 text-xs font-semibold border border-indigo-200 rounded-lg px-2.5 py-1 hover:bg-indigo-50 transition-colors">
+                                    Edit
+                                  </button>
+                                  <button onClick={() => { cancelEdit(); setDeleteConfirmId(s.id); }} className="text-red-600 text-xs font-semibold border border-red-200 rounded-lg px-2.5 py-1 hover:bg-red-50 transition-colors">
+                                    Del
+                                  </button>
+                                </span>
+                                <button
+                                  onClick={() => void openOcrReview(s)}
+                                  disabled={ocrReviewLoadingId === s.id}
+                                  className="text-amber-700 text-xs font-semibold border border-amber-200 rounded-lg px-2.5 py-1 hover:bg-amber-50 transition-colors disabled:opacity-60"
+                                >
+                                  {ocrReviewLoadingId === s.id ? <Spinner className="w-3 h-3" /> : "Review OCR"}
                                 </button>
-                                <button onClick={() => startEdit(s)} className="text-indigo-600 text-xs font-semibold border border-indigo-200 rounded-lg px-2.5 py-1 hover:bg-indigo-50 transition-colors">
-                                  Edit
-                                </button>
-                                <button onClick={() => { cancelEdit(); setDeleteConfirmId(s.id); }} className="text-red-600 text-xs font-semibold border border-red-200 rounded-lg px-2.5 py-1 hover:bg-red-50 transition-colors">
-                                  Del
-                                </button>
-                              </span>
+                              </div>
                             )}
                           </td>
                         </tr>,
@@ -631,6 +745,7 @@ export default function PortalDashboardPage() {
                             onSave={() => void saveEdit(s.id)}
                             onCancel={cancelEdit}
                             colCount={COL_COUNT}
+                            mode={editMode}
                           />
                         ),
                       ];
@@ -658,8 +773,14 @@ export default function PortalDashboardPage() {
         {/* ══════════════ STAFF TAB ══════════════ */}
         {tab === "staff" && (
           <div>
+            {!staffLoaded && (
+              <div className="card px-4 py-3 mb-4 inline-flex items-center gap-3 text-sm text-ink-secondary">
+                <Spinner />
+                Loading staff...
+              </div>
+            )}
             <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-ink-secondary">Manage staff — edit names, emails, and roles, or add new members.</p>
+              <p className="text-sm text-ink-secondary">Manage staff — edit names, email, phone, and roles, or add new members.</p>
               <button
                 onClick={() => { setShowAddForm((v) => !v); setStaffEditId(null); setAddErr(null); }}
                 className={showAddForm ? "btn-secondary" : "btn-primary"}
@@ -678,6 +799,7 @@ export default function PortalDashboardPage() {
                     { label: "Last Name *",  key: "last_name"  as const, placeholder: "Smith" },
                     { label: "Suffix",       key: "suffix"     as const, placeholder: "MD, DO, PA-C…" },
                     { label: "Email",        key: "email"      as const, placeholder: "jsmith@example.com", type: "email" },
+                    { label: "Phone",        key: "phone"      as const, placeholder: "(555) 555-1212", type: "tel" },
                   ].map(({ label, key, placeholder, type }) => (
                     <div key={key}>
                       <label className="label">{label}</label>
@@ -709,19 +831,20 @@ export default function PortalDashboardPage() {
             )}
 
             {/* Staff table */}
+            {staffLoaded && (
             <div className="card overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 620 }}>
+                <table className="w-full border-collapse" style={{ minWidth: 760 }}>
                   <thead>
                     <tr>
-                      {["Name", "Role", "Email", "Status", "Actions"].map((h, i) => (
-                        <th key={h} className={`${TH} ${i === 4 ? "text-right" : "text-left"}`}>{h}</th>
+                      {["Name", "Role", "Email", "Phone", "Status", "Actions"].map((h, i) => (
+                        <th key={h} className={`${TH} ${i === 5 ? "text-right" : "text-left"}`}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {staff.length === 0 && (
-                      <tr><td colSpan={5} className="px-4 py-10 text-center text-ink-secondary text-sm">No staff found.</td></tr>
+                      <tr><td colSpan={6} className="px-4 py-10 text-center text-ink-secondary text-sm">No staff found.</td></tr>
                     )}
                     {staff.map((s) => {
                       const isEditing = staffEditId === s.id;
@@ -741,6 +864,11 @@ export default function PortalDashboardPage() {
                               ? <a href={`mailto:${s.email}`} className="text-brand-blue hover:underline">{s.email}</a>
                               : <span className="badge-yellow">⚠ No email</span>}
                           </td>
+                          <td className={`${TD} text-xs`}>
+                            {s.phone
+                              ? <a href={`tel:${s.phone}`} className="text-brand-blue hover:underline">{s.phone}</a>
+                              : <span className="badge-yellow">⚠ No phone</span>}
+                          </td>
                           <td className={TD}>
                             {s.is_active ? <span className="badge-green">Active</span> : <span className="badge-gray">Inactive</span>}
                           </td>
@@ -750,27 +878,20 @@ export default function PortalDashboardPage() {
                                 onClick={() => isEditing ? setStaffEditId(null) : startStaffEdit(s)}
                                 className={`text-xs font-semibold border rounded-lg px-2.5 py-1 transition-colors ${isEditing ? "bg-indigo-600 text-white border-indigo-600" : "text-indigo-600 border-indigo-200 hover:bg-indigo-50"}`}
                               >{isEditing ? "Cancel" : "Edit"}</button>
-                              {sendErr[s.id] && <span className="text-xs text-red-600">{sendErr[s.id]}</span>}
-                              <button
-                                disabled={sending === s.id}
-                                onClick={() => void sendLink(s.id)}
-                                className="btn-primary text-xs px-2.5 py-1"
-                              >
-                                {sending === s.id ? <Spinner className="w-3 h-3" /> : (s.email ? "Email + QR" : "QR Link")}
-                              </button>
                             </span>
                           </td>
                         </tr>,
 
                         isEditing && (
                           <tr key={`staff-edit-${s.id}`} className="bg-brand-muted/60">
-                            <td colSpan={5} className="px-4 py-3">
+                            <td colSpan={6} className="px-4 py-3">
                               <div className="flex flex-wrap gap-3 items-end">
                                 {[
                                   { label: "First Name", key: "first_name" as const },
                                   { label: "Last Name",  key: "last_name"  as const },
                                   { label: "Suffix",     key: "suffix"     as const, placeholder: "MD, PA-C…" },
                                   { label: "Email",      key: "email"      as const, type: "email" },
+                                  { label: "Phone",      key: "phone"      as const, type: "tel", placeholder: "(555) 555-1212" },
                                 ].map(({ label, key, placeholder, type }) => (
                                   <div key={key} className="flex-1 min-w-[110px]">
                                     <label className="label">{label}</label>
@@ -819,6 +940,7 @@ export default function PortalDashboardPage() {
                 </table>
               </div>
             </div>
+            )}
           </div>
         )}
 
@@ -912,10 +1034,17 @@ export default function PortalDashboardPage() {
 
         {tab === "devices" && (
           <div>
+            {!devicesLoaded && (
+              <div className="card px-4 py-3 mb-4 inline-flex items-center gap-3 text-sm text-ink-secondary">
+                <Spinner />
+                Loading devices...
+              </div>
+            )}
             <p className="text-sm text-ink-secondary mb-4">
               <strong className="text-ink">One row per staff member</strong> — the most recently used phone or browser.{" "}
               <strong className="text-ink">Deactivate</strong> revokes access until they use a new registration link.
             </p>
+            {devicesLoaded && (
             <div className="card overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full border-collapse" style={{ minWidth: 580 }}>
@@ -970,28 +1099,119 @@ export default function PortalDashboardPage() {
                 </table>
               </div>
             </div>
+            )}
           </div>
         )}
           </main>
         </div>
       </div>
 
+      {ocrReviewScan && (
+        <div onClick={() => { setOcrReviewScan(null); setOcrReviewRuns([]); }} className="fixed inset-0 z-[205] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div onClick={(e) => e.stopPropagation()} className="bg-surface rounded-2xl w-full max-w-6xl max-h-[90dvh] overflow-auto shadow-modal border border-brand-border">
+            {(() => {
+              const primaryRun = ocrReviewRuns.find(isPrimaryOcrRun) ?? ocrReviewRuns[0] ?? null;
+              const otherRuns = primaryRun ? ocrReviewRuns.filter((run) => run.id !== primaryRun.id) : ocrReviewRuns;
+              return (
+                <>
+                  <div className="px-5 py-4 border-b border-brand-border flex items-center gap-3">
+                    <div>
+                      <h3 className="text-base font-bold text-ink">Raw OCR review</h3>
+                      <div className="text-xs text-ink-secondary">
+                        Scan #{ocrReviewScan.id} · {ocrReviewScan.surgeon_name || "—"} · {fmtDateTimeEt(ocrReviewScan.scanned_at)}
+                      </div>
+                    </div>
+                    <button onClick={() => { setOcrReviewScan(null); setOcrReviewRuns([]); }} className="ml-auto btn-secondary text-xs px-3 py-1.5">Close</button>
+                  </div>
+                  <div className="p-5 space-y-5">
+                    {!primaryRun && (
+                      <div className="card px-4 py-4 text-sm text-ink-secondary">
+                        No raw OCR audit rows were saved for this scan. Only newer captures have this trace.
+                      </div>
+                    )}
+                    {primaryRun && (
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="badge bg-amber-50 text-amber-700 border border-amber-200">Primary OCR</span>
+                          <span className="text-xs text-ink-secondary">Stage: <span className="font-semibold text-ink">{primaryRun.stage}</span></span>
+                          <span className="text-xs text-ink-secondary">Provider: <span className="font-semibold text-ink">{primaryRun.provider || "—"}</span></span>
+                          <span className="text-xs text-ink-secondary">Model: <span className="font-mono text-ink">{primaryRun.model || "—"}</span></span>
+                        </div>
+                        <div className="grid gap-4 lg:grid-cols-2">
+                          <div className="card overflow-hidden">
+                            <div className="px-4 py-3 border-b border-brand-border">
+                              <div className="text-sm font-bold text-ink">Raw model response</div>
+                              <div className="text-[11px] text-ink-secondary">Exact first-pass OCR output before enrichment or edits.</div>
+                            </div>
+                            <pre className="p-4 text-[11px] leading-5 whitespace-pre-wrap break-words bg-surface-soft text-ink overflow-x-auto">{primaryRun.raw_response || "—"}</pre>
+                          </div>
+                          <div className="card overflow-hidden">
+                            <div className="px-4 py-3 border-b border-brand-border">
+                              <div className="text-sm font-bold text-ink">Parsed JSON</div>
+                              <div className="text-[11px] text-ink-secondary">What the backend parsed from that same first-pass response.</div>
+                            </div>
+                            <pre className="p-4 text-[11px] leading-5 whitespace-pre-wrap break-words bg-surface-soft text-ink overflow-x-auto">{prettyJson(primaryRun.parsed_json)}</pre>
+                          </div>
+                        </div>
+                        {primaryRun.error_text && (
+                          <div className="card px-4 py-3 border-red-200 bg-red-50/60 text-sm text-red-700">
+                            Error: {primaryRun.error_text}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {otherRuns.length > 0 && (
+                      <div className="space-y-3">
+                        <div className="text-sm font-bold text-ink">Follow-up passes</div>
+                        <div className="space-y-3">
+                          {otherRuns.map((run) => (
+                            <div key={run.id} className="card overflow-hidden">
+                              <div className="px-4 py-3 border-b border-brand-border flex flex-wrap items-center gap-2">
+                                <span className="badge bg-surface-soft text-ink border border-brand-border">{run.stage}</span>
+                                <span className="text-xs text-ink-secondary">Provider: <span className="font-semibold text-ink">{run.provider || "—"}</span></span>
+                                <span className="text-xs text-ink-secondary">Model: <span className="font-mono text-ink">{run.model || "—"}</span></span>
+                              </div>
+                              <div className="grid gap-px bg-brand-border lg:grid-cols-2">
+                                <pre className="bg-surface p-4 text-[11px] leading-5 whitespace-pre-wrap break-words text-ink overflow-x-auto">{run.raw_response || "—"}</pre>
+                                <pre className="bg-surface p-4 text-[11px] leading-5 whitespace-pre-wrap break-words text-ink overflow-x-auto">{prettyJson(run.parsed_json)}</pre>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
       {/* ══════════════ IMAGE LIGHTBOX ══════════════ */}
       {imageModal !== null && (
         <div
-          onClick={() => setImageModal(null)}
+          onClick={closeScanImage}
           className="fixed inset-0 z-[200] bg-black/85 backdrop-blur-md flex items-center justify-center p-4 cursor-zoom-out"
         >
           <div className="max-w-full max-h-[90dvh] flex flex-col items-center gap-3" onClick={(e) => e.stopPropagation()}>
+            {imageLoading && (
+              <div className="text-white/85 text-sm inline-flex items-center gap-3">
+                <Spinner className="w-5 h-5" />
+                Loading scan image...
+              </div>
+            )}
             <img
               src={`/api/v1/portal/rvu/scans/${imageModal}/image`}
               alt="Scan photo"
-              className="max-w-full max-h-[78dvh] rounded-2xl shadow-modal"
+              onLoad={() => setImageLoading(false)}
+              onError={() => setImageLoading(false)}
+              className={`max-w-full max-h-[78dvh] rounded-2xl shadow-modal ${imageLoading ? "hidden" : "block"}`}
             />
-            <button onClick={() => setImageModal(null)} className="btn-secondary px-4 py-2 text-sm">Back to scans</button>
+            <button onClick={closeScanImage} className="btn-secondary px-4 py-2 text-sm">Back to scans</button>
           </div>
           <button
-            onClick={() => setImageModal(null)}
+            onClick={closeScanImage}
             className="fixed top-5 right-5 w-9 h-9 rounded-full bg-white/15 hover:bg-white/25 text-white text-xl flex items-center justify-center transition-colors"
           >×</button>
         </div>
@@ -1087,49 +1307,6 @@ export default function PortalDashboardPage() {
         </div>
       )}
 
-      {/* ══════════════ QR MODAL ══════════════ */}
-      {qrModal && (
-        <div
-          onClick={(e) => { if (e.target === e.currentTarget) setQrModal(null); }}
-          className="fixed inset-0 z-[100] bg-black/55 backdrop-blur flex items-center justify-center p-4"
-        >
-          <div className="bg-surface rounded-3xl shadow-modal w-full max-w-sm p-8 text-center relative">
-            <button
-              onClick={() => setQrModal(null)}
-              className="absolute top-4 right-4 w-8 h-8 rounded-full bg-surface-soft hover:bg-brand-border text-ink-secondary flex items-center justify-center text-lg transition-colors"
-            >×</button>
-
-            <p className="label mb-1">Staff registration link</p>
-            <h2 className="text-xl font-black text-ink mb-2">{qrModal.surgeon}</h2>
-            <p className={`text-xs font-semibold mb-5 ${qrModal.emailed ? "text-green-700" : "text-amber-600"}`}>
-              {qrModal.emailed ? `✓ Email sent to ${qrModal.email}` : "⚠ No email on file — share the link below"}
-            </p>
-
-            <div className="inline-block p-3 bg-surface border-2 border-brand-border rounded-2xl mb-5 shadow-card">
-              <img
-                src={`data:image/png;base64,${qrModal.qr_b64}`}
-                alt="Registration link QR code"
-                className="block w-48 h-48 rounded-lg"
-              />
-            </div>
-
-            <div className="flex items-center gap-2 bg-surface-soft border border-brand-border rounded-xl px-3 py-2.5 mb-4">
-              <span className="flex-1 text-[11px] font-mono text-ink-secondary truncate text-left">{qrModal.magic_url}</span>
-              <button
-                onClick={copyLink}
-                className={`flex-shrink-0 text-xs font-bold px-3 py-1.5 rounded-lg transition-colors ${copied ? "bg-green-700 text-white" : "bg-ink text-white hover:bg-ink/90"}`}
-              >{copied ? "✓ Copied" : "Copy"}</button>
-            </div>
-
-            <p className="text-xs text-ink-secondary mb-5">Link expires in 7 days. Scanning or clicking it registers the device.</p>
-
-            <button
-              onClick={() => setQrModal(null)}
-              className="btn-secondary w-full py-3"
-            >Done</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

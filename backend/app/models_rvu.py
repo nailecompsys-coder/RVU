@@ -5,6 +5,8 @@ enrichment and surgeon edits (CPT, provider, per-line DOS, RVU/payment component
 `cpts` JSON is an ordered denormalized list of surgeon-line CPT codes — it must match
 the surgeon rows in `line_items` (duplicates allowed for multi-day / same-code lines).
 `scan_status` pending vs verified gates inclusion in compensation rollups.
+Raw model outputs live in `rvu_scan_ai_runs` so provenance stays separate from the
+final billing snapshot in `rvu_scans`.
 """
 from datetime import datetime
 
@@ -47,6 +49,26 @@ class RvuScan(Base):
     client_request_id = Column(String(128), nullable=True)
 
     surgeon = relationship("RvuStaff")
+
+
+class RvuScanAiRun(Base):
+    __tablename__ = "rvu_scan_ai_runs"
+    __table_args__ = (
+        Index("ix_rvu_scan_ai_runs_scan_seq", "scan_id", "sequence_num"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    scan_id = Column(Integer, ForeignKey("rvu_scans.id"), nullable=False)
+    sequence_num = Column(Integer, nullable=False, default=0)
+    stage = Column(String(64), nullable=False)
+    provider = Column(String(32), nullable=True)
+    model = Column(String(120), nullable=True)
+    raw_response = Column(Text, nullable=True)
+    parsed_json = Column(Text, nullable=True)
+    error_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    scan = relationship("RvuScan")
 
 
 class RvuUserSettings(Base):

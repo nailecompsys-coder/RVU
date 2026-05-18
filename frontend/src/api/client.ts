@@ -63,8 +63,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
   history: () => json<{ scans: ScanRow[] }>("/api/v1/rvu/history"),
-  portalScans: (limit = 500) =>
-    json<{ scans: PortalScanRow[] }>(`/api/v1/portal/rvu/scans?limit=${limit}`),
+  portalScans: (limit = 100, offset = 0) =>
+    json<PortalScansResponse>(`/api/v1/portal/rvu/scans?limit=${limit}&offset=${offset}`),
+  portalScanDetail: (id: number) =>
+    json<PortalScanRow>(`/api/v1/portal/rvu/scans/${id}`),
+  portalScanAiRuns: (id: number) =>
+    json<{ scan_id: number; ai_runs: PortalScanAiRun[] }>(`/api/v1/portal/rvu/scans/${id}/ai-runs`),
   adminStaff: (includeInactive = false) =>
     json<{ staff: StaffMember[] }>(`/api/v1/auth/admin/staff${includeInactive ? "?include_inactive=true" : ""}`),
   createStaff: (body: StaffCreateBody) =>
@@ -74,11 +78,6 @@ export const api = {
   listDevices: () => json<{ devices: DeviceRecord[] }>("/api/v1/auth/admin/devices"),
   patchDevice: (id: number, body: { is_active: boolean }) =>
     json<DeviceRecord>(`/api/v1/auth/admin/devices/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-  sendMagicLink: (surgeon_id: number) =>
-    json<{ ok: boolean; surgeon: string; email: string | null; magic_url: string; qr_b64: string; emailed: boolean }>(
-      "/api/v1/auth/admin/send-magic-link",
-      { method: "POST", body: JSON.stringify({ surgeon_id }) }
-    ),
   patchScan: (id: number, body: ScanPatchBody) =>
     json<PortalScanRow>(`/api/v1/portal/rvu/scans/${id}`, {
       method: "PATCH",
@@ -340,12 +339,39 @@ export type ScanRow = {
   ocr_elapsed_label?: string | null;
   surgeon_name?: string | null;
   staff_type?: string | null;
+  cpt_count?: number;
+  work_rvu?: number;
+  surgeon_value?: number;
+  facility_share?: number;
+  assist_count?: number;
 };
 
 export type PortalScanRow = ScanRow & {
   surgeon_id: number;
   surgeon_name: string | null;
   staff_type: string | null;
+};
+
+export type PortalScansResponse = {
+  scans: PortalScanRow[];
+  limit: number;
+  offset: number;
+  total_count: number;
+  has_more: boolean;
+};
+
+export type PortalScanAiRun = {
+  id: number;
+  scan_id: number;
+  sequence_num: number;
+  stage: string;
+  provider: string | null;
+  model: string | null;
+  raw_response: string | null;
+  parsed_json: Record<string, unknown> | unknown[] | null;
+  error_text: string | null;
+  created_at: string | null;
+  created_at_et: string | null;
 };
 
 export type ScanPatchBody = {
@@ -364,6 +390,7 @@ export type StaffMember = {
   full_name: string;
   staff_type: string | null;
   email: string | null;
+  phone: string | null;
   suffix: string | null;
   is_active: boolean;
 };
@@ -374,6 +401,7 @@ export type StaffPatchBody = {
   suffix?: string;
   staff_type?: string;
   email?: string;
+  phone?: string;
   is_active?: boolean;
 };
 
@@ -394,6 +422,7 @@ export type StaffCreateBody = {
   suffix?: string;
   staff_type?: string;
   email?: string;
+  phone?: string;
 };
 
 export type LookupBody = {

@@ -139,7 +139,7 @@ How to fill it:
   - "is_assist" (boolean; true if AS/assistant line)
   - "line_service_date" (string, ISO YYYY-MM-DD): when this **row** has its own date of service or date column (multi-day hospital stays, per-line DOS columns), set it; use "" if the row uses the same global date as the block or no per-row date is printed.
 - "service_date": top-level date for the charge **block** when a single shared DOS applies to all listed lines (header date). Use ISO YYYY-MM-DD. Use "" if only per-row dates exist (then rely on line_service_date per line).
-- "mrn": patient MRN or account ID if visible, else "". (The API may also send MRN typed by the clinician on the device; when present, the server keeps that value instead of OCR.)
+- "mrn": patient MRN or account ID if visible, else "". MRN is numeric only: output digits only and prefer digits over lookalike letters (for example S->5, O->0).
 - If the same CPT appears twice for different providers (example surgeon + PA assist), keep BOTH line objects.
 - Modifiers like -50 or -LT: keep only the five-digit procedure number.
 - Ignore codes that are not plain 5 digits (letter-prefixed HCPCS, revenue codes, etc.).
@@ -176,7 +176,7 @@ _REFINE_TEXT_PROMPT = """First pass found these CPTs: {known_json}
 
 Read the SAME user text again. List ONLY additional distinct 5-digit CPT codes that appear in the text and are NOT in that list.
 
-Return ONE JSON object only (no markdown): {{"additional_lines": [], "patient_name": "", "mrn": ""}} with the array filled only from the text (each item {{"cpt": "<five digits from text>", "procedure_name": ""}}). If none, keep additional_lines empty. If patient name or MRN are visible in the text and were missed before, include them. Do not invent codes.
+Return ONE JSON object only (no markdown): {{"additional_lines": [], "patient_name": "", "mrn": ""}} with the array filled only from the text (each item {{"cpt": "<five digits from text>", "procedure_name": ""}}). If none, keep additional_lines empty. If patient name or MRN are visible in the text and were missed before, include them. MRN is digits only. Do not invent codes.
 """
 
 _TABLE_FOCUS_PROMPT = """Read this hospital charge screenshot as a TABLE.
@@ -202,6 +202,57 @@ For each visible charge row, include one object in "lines" with:
 - line_service_date (ISO or "" if this row shares the block header date only)
 
 If same CPT appears on multiple rows with different provider, modifier, or **different DOS**, keep separate rows and set line_service_date when dates differ.
+MRN is digits only if visible.
+"""
+
+_DEMOGRAPHICS_FOCUS_PROMPT = """Read only the patient demographics/header area of this hospital charge screenshot.
+
+Return ONE JSON object only (no markdown):
+{"service_date":"","patient_name":"","mrn":"","surgeon_name":"","lines":[]}
+
+Rules:
+- Focus on patient name, MRN/account number, and top-level service date if visible.
+- MRN must be the full visible identifier, digits only, minimum 8 digits and maximum 14 digits.
+- If you cannot clearly see a full 8-14 digit MRN, return "" for mrn.
+- Do not invent CPT rows.
+- Leave lines empty.
+"""
+
+_MODIFIER_FOCUS_PROMPT = """You are reading the RIGHT SIDE of the same hospital charge screenshot.
+
+Known charge rows from the first pass:
+{known_json}
+
+Task: improve ONLY those known rows by reading columns such as:
+- Service Provider
+- Billing Provider
+- Modifier
+- per-line Date of Service
+
+Return ONE JSON object only (no markdown):
+{{"service_date":"","patient_name":"","mrn":"","surgeon_name":"","lines":[]}}
+
+Rules:
+- Only return rows for CPT codes already present in the known rows above.
+- Do not invent new CPT codes.
+- If a known row's modifier is visible, include it.
+- If provider name is visible for that same row, include it.
+- MRN is digits only if present.
+- If a field is not visible, leave it empty.
+- If multiple known rows share a CPT, use provider name / DOS / modifier only when you can actually see them.
+"""
+
+_RAW_TRANSCRIPT_PROMPT = """You are reading one full screenshot of a medical charge screen.
+
+Transcribe everything visible in the image as raw text.
+
+Rules:
+- Read the full image from top-left to bottom-right.
+- Do not summarize.
+- Do not normalize.
+- Preserve visible wording, dates, times, CPT codes, provider names, modifiers, quantities, and row text.
+- Include charge rows exactly as shown when possible.
+- Output plain text only.
 """
 
 _OP_NOTE_PROMPT = """You are reading a photo of an operative note, procedure dictation, or clinical document.
@@ -245,6 +296,170 @@ Return ONE JSON object only, no markdown fences. Use double quotes. Schema:
 "cpt_codes": list of strings, each exactly five digits if visible (no HCPCS letter codes). "procedure_steps": array of short bullet strings in order. If a field truly does not appear anywhere, keep it empty.
 """
 
+def _normalize_mrn_digits(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return digits[:64] or None
+
+
+def _valid_mrn_or_none(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if 8 <= len(digits) <= 14:
+        return digits
+    return None
+
+
+_KNOWN_MODIFIER_CODES = {
+    "22", "50", "51", "52", "53", "57", "58", "59",
+    "62", "66", "78", "79", "80", "81", "82", "AS", "LT", "RT",
+}
+
+
+def _split_modifier_codes(text: str) -> tuple[str, ...]:
+    parts = [p.strip().upper() for p in str(text or "").replace("/", ",").split(",") if p.strip()]
+    return tuple(dict.fromkeys(p for p in parts if p in _KNOWN_MODIFIER_CODES))
+
+
+def _parse_datetime_bits(text: str) -> tuple[str | None, str | None, str | None]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None, None, None
+    m = re.search(r"(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?:\s+(\d{1,2}:\d{2}\s*[AP]M))?", raw, re.I)
+    if not m:
+        return None, None, None
+    date_raw = m.group(1)
+    time_raw = (m.group(2) or "").upper().replace("  ", " ").strip()
+    iso_date = RvuPaymentService.coerce_service_date_iso(date_raw)
+    if not iso_date:
+        return None, None, None
+    full_raw = f"{date_raw} {time_raw}".strip() if time_raw else date_raw
+    return iso_date, time_raw or None, full_raw
+
+
+def _parse_visible_quantity(text: str) -> int | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    m = re.fullmatch(r"\d+", raw)
+    return int(raw) if m else None
+
+
+def _parse_provider_role_from_visible_text(provider_name: str, procedure_name: str, modifier: str) -> str:
+    merged = " ".join(x for x in (provider_name, procedure_name, modifier) if x).upper()
+    if " AS" in f" {merged}" or re.search(r"\bPA(?:-C)?\b", merged):
+        return "pa"
+    if re.search(r"\bASSIST", merged):
+        return "assistant"
+    return "unknown"
+
+
+def _parse_transcript_patient_name(raw_text: str) -> str | None:
+    match = re.search(
+        r"\b([A-Z][A-Za-z'`.-]+,\s*[A-Z][A-Za-z'`.-]+(?:\s+[A-Z][A-Za-z'`.-]+){0,2})\s*\|\s*Patient Lookup\b",
+        raw_text,
+    )
+    if match:
+        return match.group(1).strip()[:255]
+    return _patient_name_from_model(None, raw_text)
+
+
+def _parse_transcript_modifier_summary(raw_text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in raw_text.splitlines():
+        if "Mods" not in line or not re.search(r"\b\d{5}\b", line):
+            continue
+        cpt_match = re.search(r"\b(\d{5})\b", line)
+        mod_match = re.search(r"\bMods?\s+([A-Z0-9,\/ ]+)$", line, re.I)
+        if not cpt_match or not mod_match:
+            continue
+        codes = _split_modifier_codes(mod_match.group(1))
+        if codes and cpt_match.group(1) not in out:
+            out[cpt_match.group(1)] = ",".join(codes)
+    return out
+
+
+def _parse_transcript_charge_rows(raw_text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    in_charge_table = False
+    summary_mods = _parse_transcript_modifier_summary(raw_text)
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if in_charge_table:
+                in_charge_table = False
+            continue
+        normalized = re.sub(r"\s+", " ", line)
+        if "Description | Code |" in normalized and "Service Date" in normalized:
+            in_charge_table = True
+            continue
+        if not in_charge_table or "|" not in normalized:
+            continue
+        if normalized.startswith("Associated Dx:") or normalized.startswith("My Specialty"):
+            in_charge_table = False
+            continue
+        cols = [c.strip() for c in normalized.split("|")]
+        cpt_idx = next((idx for idx, col in enumerate(cols) if re.search(r"\b\d{5}\b", col)), None)
+        if cpt_idx is None or cpt_idx == 0:
+            continue
+        cpt_match = re.search(r"\b(\d{5})\b", cols[cpt_idx])
+        if not cpt_match:
+            continue
+        cpt = cpt_match.group(1)
+        procedure_name = cols[cpt_idx - 1].strip()
+        service_dt_raw = cols[cpt_idx + 2].strip() if len(cols) > cpt_idx + 2 else ""
+        provider_name = cols[cpt_idx + 3].strip() if len(cols) > cpt_idx + 3 else ""
+        modifier_text = cols[cpt_idx + 4].strip() if len(cols) > cpt_idx + 4 else ""
+        quantity_text = cols[cpt_idx + 5].strip() if len(cols) > cpt_idx + 5 else ""
+        modifier_codes = _split_modifier_codes(modifier_text)
+        if not modifier_codes and cpt in summary_mods:
+            modifier_codes = tuple(summary_mods[cpt].split(","))
+        line_service_date, line_time_raw, line_datetime_raw = _parse_datetime_bits(service_dt_raw)
+        modifier = ",".join(modifier_codes)
+        rows.append(
+            {
+                "cpt": cpt,
+                "procedure_name": procedure_name,
+                "provider_name": provider_name,
+                "provider_role": _parse_provider_role_from_visible_text(provider_name, procedure_name, modifier),
+                "modifier": modifier,
+                "is_assist": "AS" in modifier,
+                "line_service_date": line_service_date or "",
+                "line_service_time_raw": line_time_raw or "",
+                "line_service_datetime_raw": line_datetime_raw or service_dt_raw,
+                "quantity": _parse_visible_quantity(quantity_text),
+                "raw_row_text": normalized,
+            }
+        )
+    return rows
+
+
+def _build_capture_from_raw_transcript(raw_text: str) -> dict[str, Any]:
+    lines = _parse_transcript_charge_rows(raw_text)
+    cpts = _cpts_for_surgeon_lines(lines)
+    mrn = _normalize_mrn_digits(re.search(r"\bMRN[:#]?\s*([A-Z0-9-]+)", raw_text, re.I).group(1)) if re.search(r"\bMRN[:#]?\s*([A-Z0-9-]+)", raw_text, re.I) else None
+    patient_name = _parse_transcript_patient_name(raw_text)
+    service_date = next((str(line.get("line_service_date") or "").strip() for line in lines if str(line.get("line_service_date") or "").strip()), None)
+    surgeon_name = None
+    for line in lines:
+        provider_name = str(line.get("provider_name") or "").strip()
+        if provider_name:
+            surgeon_name = provider_name
+            break
+    return {
+        "cpts": cpts,
+        "service_date": service_date,
+        "patient_name": patient_name,
+        "mrn": mrn,
+        "surgeon_name": surgeon_name,
+        "lines": lines,
+        "raw_transcript": raw_text,
+    }
+
 
 def _service_date_and_mrn_from_model(obj: dict[str, Any] | None, raw_text: str) -> tuple[str | None, str | None]:
     """Coerce service_date from model JSON + loose patterns in raw output; Epic often uses M/D/YYYY."""
@@ -260,7 +475,7 @@ def _service_date_and_mrn_from_model(obj: dict[str, Any] | None, raw_text: str) 
         for key in ("mrn", "MRN", "patient_mrn", "medical_record_number"):
             val = obj.get(key)
             if val is not None and str(val).strip():
-                mrn_out = str(val).strip()[:64]
+                mrn_out = _normalize_mrn_digits(val)
                 break
     if not sd_out:
         for pat in (
@@ -341,6 +556,14 @@ def _line_from_row(row: dict) -> dict[str, Any] | None:
     }
     if line_sd:
         out["line_service_date"] = line_sd
+    if str(row.get("line_service_datetime_raw") or "").strip():
+        out["line_service_datetime_raw"] = str(row.get("line_service_datetime_raw") or "").strip()
+    if str(row.get("line_service_time_raw") or "").strip():
+        out["line_service_time_raw"] = str(row.get("line_service_time_raw") or "").strip()
+    if str(row.get("raw_row_text") or "").strip():
+        out["raw_row_text"] = str(row.get("raw_row_text") or "").strip()
+    if row.get("quantity") not in (None, ""):
+        out["quantity"] = row.get("quantity")
     return out
 
 
@@ -360,6 +583,173 @@ def _line_dedupe_key(line: dict[str, Any]) -> tuple[str, str, str, bool, str]:
     return (cpt, prov, role, is_a, lsd)
 
 
+def _modifier_tokens(value: str) -> tuple[str, ...]:
+    parts = [p.strip().upper() for p in str(value or "").split(",") if p.strip()]
+    return tuple(dict.fromkeys(parts))
+
+
+def _clean_line_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalized_provider_role(value: Any) -> str:
+    role = _clean_line_text(value).lower() or "unknown"
+    return role if role in ("surgeon", "pa", "assistant", "unknown") else "unknown"
+
+
+def _row_is_sparse(line: dict[str, Any]) -> bool:
+    return (
+        not _clean_line_text(line.get("provider_name"))
+        or _normalized_provider_role(line.get("provider_role")) == "unknown"
+        or not _clean_line_text(line.get("procedure_name"))
+    )
+
+
+def _merge_line_details(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    changed = False
+
+    def fill(field: str) -> None:
+        nonlocal changed
+        if not str(existing.get(field) or "").strip() and str(incoming.get(field) or "").strip():
+            existing[field] = incoming[field]
+            changed = True
+
+    fill("procedure_name")
+    fill("provider_name")
+
+    existing_role = str(existing.get("provider_role") or "unknown").strip().lower()
+    incoming_role = str(incoming.get("provider_role") or "unknown").strip().lower()
+    if existing_role == "unknown" and incoming_role in ("surgeon", "pa", "assistant"):
+        existing["provider_role"] = incoming_role
+        changed = True
+
+    if not bool(existing.get("is_assist")) and bool(incoming.get("is_assist")):
+        existing["is_assist"] = True
+        changed = True
+
+    existing_mods = _modifier_tokens(existing.get("modifier") or "")
+    incoming_mods = _modifier_tokens(incoming.get("modifier") or "")
+    if incoming_mods and not existing_mods:
+        existing["modifier"] = ",".join(incoming_mods)
+        changed = True
+
+    if not str(existing.get("line_service_date") or "").strip() and str(incoming.get("line_service_date") or "").strip():
+        existing["line_service_date"] = incoming["line_service_date"]
+        changed = True
+
+    for field in ("line_service_datetime_raw", "line_service_time_raw", "raw_row_text", "quantity"):
+        if existing.get(field) in (None, "") and incoming.get(field) not in (None, ""):
+            existing[field] = incoming[field]
+            changed = True
+
+    return changed
+
+
+def _rows_can_merge(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    existing_mods = _modifier_tokens(existing.get("modifier") or "")
+    incoming_mods = _modifier_tokens(incoming.get("modifier") or "")
+    if existing_mods and incoming_mods and existing_mods != incoming_mods:
+        return False
+    return True
+
+
+def _merge_candidate_score(existing: dict[str, Any], incoming: dict[str, Any]) -> int | None:
+    if str(existing.get("cpt") or "").strip() != str(incoming.get("cpt") or "").strip():
+        return None
+    if bool(existing.get("is_assist")) != bool(incoming.get("is_assist")):
+        return None
+    if not _rows_can_merge(existing, incoming):
+        return None
+
+    score = 0
+
+    existing_sd = _clean_line_text(existing.get("line_service_date"))
+    incoming_sd = _clean_line_text(incoming.get("line_service_date"))
+    if existing_sd and incoming_sd:
+        if existing_sd != incoming_sd:
+            return None
+        score += 4
+    elif existing_sd or incoming_sd:
+        score += 1
+
+    existing_provider = _clean_line_text(existing.get("provider_name")).lower()
+    incoming_provider = _clean_line_text(incoming.get("provider_name")).lower()
+    if existing_provider and incoming_provider:
+        if existing_provider != incoming_provider:
+            return None
+        score += 8
+    elif existing_provider or incoming_provider:
+        score += 2
+
+    existing_role = _normalized_provider_role(existing.get("provider_role"))
+    incoming_role = _normalized_provider_role(incoming.get("provider_role"))
+    if existing_role != "unknown" and incoming_role != "unknown":
+        if existing_role != incoming_role:
+            return None
+        score += 4
+    elif existing_role != "unknown" or incoming_role != "unknown":
+        score += 1
+
+    existing_proc = _clean_line_text(existing.get("procedure_name")).lower()
+    incoming_proc = _clean_line_text(incoming.get("procedure_name")).lower()
+    if existing_proc and incoming_proc:
+        if existing_proc != incoming_proc:
+            return None
+        score += 2
+    elif existing_proc or incoming_proc:
+        score += 1
+
+    return score
+
+
+def _best_merge_candidate(lines: list[dict[str, Any]], incoming: dict[str, Any]) -> tuple[int | None, bool]:
+    best_idx: int | None = None
+    best_score: int | None = None
+    ambiguous = False
+    for idx, existing in enumerate(lines):
+        score = _merge_candidate_score(existing, incoming)
+        if score is None:
+            continue
+        if best_score is None or score > best_score:
+            best_idx = idx
+            best_score = score
+            ambiguous = False
+            continue
+        if score == best_score:
+            ambiguous = True
+    return best_idx, ambiguous
+
+
+def _append_or_merge_line(
+    lines_out: list[dict[str, Any]],
+    seen_lines: dict[tuple[str, str, str, bool, str], list[int]],
+    row: dict[str, Any],
+) -> tuple[dict[str, Any] | None, bool]:
+    line = _line_from_row(row)
+    if not line:
+        return None, False
+
+    key = _line_dedupe_key(line)
+    match_indexes = seen_lines.get(key, [])
+    for idx in match_indexes:
+        existing = lines_out[idx]
+        if _rows_can_merge(existing, line):
+            _merge_line_details(existing, line)
+            return existing, False
+
+    candidate_idx, ambiguous = _best_merge_candidate(lines_out, line)
+    if candidate_idx is not None and not ambiguous:
+        _merge_line_details(lines_out[candidate_idx], line)
+        return lines_out[candidate_idx], False
+
+    if ambiguous and _row_is_sparse(line):
+        return None, True
+
+    lines_out.append(line)
+    seen_lines.setdefault(key, []).append(len(lines_out) - 1)
+    return line, False
+
+
 def _cpts_for_surgeon_lines(lines: list[Any]) -> list[str]:
     """Ordered CPT list for payment rows — one entry per surgeon line (allows duplicate CPT codes)."""
     out: list[str] = []
@@ -376,6 +766,13 @@ def _cpts_for_surgeon_lines(lines: list[Any]) -> list[str]:
     return out
 
 
+def _json_roundtrip(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except Exception:
+        return value
+
+
 class RvuCptExtractionService:
     """Anthropic / OpenAI vision and text → structured charge capture (no local LLM)."""
 
@@ -385,6 +782,28 @@ class RvuCptExtractionService:
     openai_api_key = _OPENAI_API_KEY
     anthropic_api_key = _ANTHROPIC_API_KEY
     last_charge_capture_backend: str | None = None
+
+    @staticmethod
+    def _record_ai_run(
+        artifacts: list[dict[str, Any]],
+        *,
+        stage: str,
+        provider: str,
+        model: str,
+        raw_response: str | None = None,
+        parsed_json: Any = None,
+        error_text: str | None = None,
+    ) -> None:
+        artifacts.append(
+            {
+                "stage": stage,
+                "provider": provider,
+                "model": model,
+                "raw_response": str(raw_response or ""),
+                "parsed_json": _json_roundtrip(parsed_json) if parsed_json is not None else None,
+                "error_text": str(error_text or ""),
+            }
+        )
 
     def get_vision_config(self) -> dict[str, str]:
         first = first_resolvable_pipeline_stage(self.anthropic_api_key, self.openai_api_key)
@@ -470,6 +889,19 @@ class RvuCptExtractionService:
         return buf.getvalue()
 
     @staticmethod
+    def demographics_crop(image_bytes: bytes) -> bytes:
+        """
+        Crop the top demographics/header band where patient name, MRN,
+        and shared DOS usually appear.
+        """
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        w, h = img.size
+        crop = img.crop((0, 0, w, int(h * 0.42)))
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+
+    @staticmethod
     def _has_provider_context(cap: dict[str, Any]) -> bool:
         if cap.get("surgeon_name"):
             return True
@@ -483,6 +915,136 @@ class RvuCptExtractionService:
             if row.get("is_assist"):
                 return True
         return False
+
+    @staticmethod
+    def _needs_modifier_retry(cap: dict[str, Any]) -> bool:
+        surgeon_lines = [
+            row
+            for row in (cap.get("lines") or [])
+            if isinstance(row, dict)
+            and not bool(row.get("is_assist"))
+            and str(row.get("provider_role") or "").strip().lower() not in ("pa", "assistant")
+            and re.fullmatch(r"\d{5}", str(row.get("cpt") or "").strip())
+        ]
+        if not surgeon_lines:
+            return False
+        missing_modifier_lines = [
+            row for row in surgeon_lines if not _modifier_tokens(row.get("modifier") or "")
+        ]
+        if not missing_modifier_lines:
+            return False
+        # The main OCR pass found charge rows, but the rightmost modifier column is easy to miss.
+        return any(
+            str(row.get("procedure_name") or row.get("provider_name") or "").strip()
+            for row in missing_modifier_lines
+        )
+
+    @staticmethod
+    def _needs_demographics_retry(cap: dict[str, Any]) -> bool:
+        return _valid_mrn_or_none(cap.get("mrn")) is None
+
+    def _augment_with_full_transcript(
+        self,
+        cap: dict[str, Any],
+        image_jpeg_bytes: bytes,
+        *,
+        provider: str,
+        artifacts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        # Disabled in the hot path for now. It adds latency and has been
+        # introducing noisy top-level fields in field testing.
+        return cap
+        b64 = base64.b64encode(image_jpeg_bytes).decode()
+        if provider == "anthropic":
+            raw_text = self.anthropic_generate_once(_RAW_TRANSCRIPT_PROMPT, b64, max_tokens=4096)
+            model = self.vision_model
+        else:
+            raw_text = self.openai_generate_once(_RAW_TRANSCRIPT_PROMPT, b64, max_tokens=4096)
+            model = _OPENAI_VISION_MODEL
+        transcript_cap = _build_capture_from_raw_transcript(raw_text)
+        if artifacts is not None:
+            self._record_ai_run(
+                artifacts,
+                stage="vision_transcript",
+                provider=provider,
+                model=model,
+                raw_response=raw_text,
+                parsed_json=transcript_cap,
+            )
+        return self.merge_captures(cap, transcript_cap)
+
+    @staticmethod
+    def _modifier_retry_prompt(cap: dict[str, Any]) -> str:
+        known_rows: list[dict[str, Any]] = []
+        for row in cap.get("lines") or []:
+            if not isinstance(row, dict):
+                continue
+            cpt = str(row.get("cpt") or "").strip()
+            if not re.fullmatch(r"\d{5}", cpt):
+                continue
+            known_rows.append(
+                {
+                    "cpt": cpt,
+                    "procedure_name": str(row.get("procedure_name") or "").strip(),
+                    "provider_name": str(row.get("provider_name") or "").strip(),
+                    "provider_role": str(row.get("provider_role") or "unknown").strip().lower(),
+                    "modifier": str(row.get("modifier") or "").strip().upper(),
+                    "line_service_date": str(row.get("line_service_date") or "").strip(),
+                }
+            )
+        return _MODIFIER_FOCUS_PROMPT.format(known_json=json.dumps(known_rows))
+
+    def _run_demographics_retry(
+        self,
+        merged: dict[str, Any],
+        image_jpeg_bytes: bytes,
+        *,
+        provider: str,
+        artifacts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not self._needs_demographics_retry(merged):
+            return merged
+        try:
+            focus_image = self.demographics_crop(image_jpeg_bytes)
+            focus_b64 = base64.b64encode(focus_image).decode()
+        except Exception:
+            return merged
+
+        providers: list[str] = []
+        if provider == "anthropic":
+            providers.append("anthropic")
+            if self.openai_api_key:
+                providers.append("openai")
+        else:
+            providers.append("openai")
+            if self.anthropic_api_key:
+                providers.append("anthropic")
+
+        out = merged
+        for stage_provider in providers:
+            try:
+                if stage_provider == "anthropic":
+                    raw_text = self.anthropic_generate_once(_DEMOGRAPHICS_FOCUS_PROMPT, focus_b64)
+                    model = self.vision_model
+                else:
+                    raw_text = self.openai_generate_once(_DEMOGRAPHICS_FOCUS_PROMPT, focus_b64)
+                    model = _OPENAI_VISION_MODEL
+                parsed = self.parse_demographics_response(raw_text)
+                parsed["mrn"] = _valid_mrn_or_none(parsed.get("mrn"))
+                self._record_ai_run(
+                    artifacts,
+                    stage="vision_demographics_retry",
+                    provider=stage_provider,
+                    model=model,
+                    raw_response=raw_text,
+                    parsed_json=parsed,
+                )
+                out = self.merge_captures(out, parsed)
+                if _valid_mrn_or_none(out.get("mrn")):
+                    break
+            except Exception:
+                continue
+        return out
 
     def openai_generate_once(
         self,
@@ -694,18 +1256,13 @@ class RvuCptExtractionService:
         """Append extra CPT lines to primary; primary wins for service_date / mrn."""
         lines_out: list[dict[str, Any]] = []
         cpts_out: list[str] = []
-        seen_lines: set[tuple[str, str, str, bool, str]] = set()
+        seen_lines: dict[tuple[str, str, str, bool, str], list[int]] = {}
 
         def add_row(row: dict) -> None:
-            line = _line_from_row(row)
-            if not line:
+            line, dropped = _append_or_merge_line(lines_out, seen_lines, row)
+            if dropped or not line:
                 return
-            key = _line_dedupe_key(line)
-            if key in seen_lines:
-                return
-            seen_lines.add(key)
-            lines_out.append(line)
-            if not line.get("is_assist") and str(line.get("provider_role") or "").strip().lower() != "pa":
+            if lines_out and lines_out[-1] is line and not line.get("is_assist") and str(line.get("provider_role") or "").strip().lower() != "pa":
                 cpts_out.append(line["cpt"])
 
         def append_surgeon_stub(code: str) -> None:
@@ -754,13 +1311,13 @@ class RvuCptExtractionService:
             v = m.get("mrn")
             if v is None or not str(v).strip():
                 return None
-            return str(v).strip()[:64]
+            return _normalize_mrn_digits(v)
 
         p_sd, e_sd = _sd(primary), _sd(extra)
         p_mrn, e_mrn = _mrn(primary), _mrn(extra)
         p_patient_name = _patient_name_from_model(primary, "")
         e_patient_name = _patient_name_from_model(extra, "")
-        return {
+        merged = {
             "cpts": _cpts_for_surgeon_lines(lines_out) or cpts_out,
             "lines": lines_out,
             "service_date": p_sd or e_sd,
@@ -768,6 +1325,17 @@ class RvuCptExtractionService:
             "mrn": p_mrn or e_mrn,
             "surgeon_name": str(primary.get("surgeon_name") or extra.get("surgeon_name") or "").strip() or None,
         }
+        raw_transcript = str(primary.get("raw_transcript") or extra.get("raw_transcript") or "").strip()
+        if raw_transcript:
+            merged["raw_transcript"] = raw_transcript
+        merged_runs = []
+        for source in (primary, extra):
+            runs = source.get("_ai_runs")
+            if isinstance(runs, list):
+                merged_runs.extend(_json_roundtrip(runs) or [])
+        if merged_runs:
+            merged["_ai_runs"] = merged_runs
+        return merged
 
     def parse_refine_additional(self, text: str) -> dict[str, Any]:
         """Parse second-pass JSON with additional_lines (or lines) only."""
@@ -779,18 +1347,13 @@ class RvuCptExtractionService:
             raw = obj.get("lines") or []
         lines: list[dict[str, Any]] = []
         cpts: list[str] = []
-        seen_lines: set[tuple[str, str, str, bool, str]] = set()
+        seen_lines: dict[tuple[str, str, str, bool, str], list[int]] = {}
         for row in raw:
             if not isinstance(row, dict):
                 continue
-            line = _line_from_row(row)
-            if not line:
+            line, dropped = _append_or_merge_line(lines, seen_lines, row)
+            if dropped or not line:
                 continue
-            key = _line_dedupe_key(line)
-            if key in seen_lines:
-                continue
-            seen_lines.add(key)
-            lines.append(line)
         cpts = _cpts_for_surgeon_lines(lines)
         if not cpts:
             seen_surgeon_cpts: set[str] = set()
@@ -805,7 +1368,13 @@ class RvuCptExtractionService:
         surgeon_name = str((obj or {}).get("surgeon_name") or "").strip() if obj else ""
         return {"cpts": cpts, "lines": lines, "service_date": sd, "patient_name": patient_name, "mrn": mrn, "surgeon_name": surgeon_name or None}
 
-    def refine_vision_additional(self, image_jpeg_bytes: bytes, first_cap: dict[str, Any]) -> dict[str, Any]:
+    def refine_vision_additional(
+        self,
+        image_jpeg_bytes: bytes,
+        first_cap: dict[str, Any],
+        *,
+        artifact_sink: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         known = first_cap.get("cpts") or []
         b64 = base64.b64encode(image_jpeg_bytes).decode()
         prompt = _REFINE_VISION_PROMPT.format(known_json=json.dumps(known))
@@ -814,18 +1383,44 @@ class RvuCptExtractionService:
             if stage == "anthropic" and self.anthropic_api_key:
                 try:
                     text = self.anthropic_generate_once(prompt, b64, max_tokens=2048)
-                    return self.parse_refine_additional(text)
+                    parsed = self.parse_refine_additional(text)
+                    if artifact_sink is not None:
+                        self._record_ai_run(
+                            artifact_sink,
+                            stage="vision_refine_additional",
+                            provider="anthropic",
+                            model=self.vision_model,
+                            raw_response=text,
+                            parsed_json=parsed,
+                        )
+                    return parsed
                 except Exception:
                     continue
             if stage == "openai" and self.openai_api_key:
                 try:
                     text = self.openai_generate_once(prompt, b64, max_tokens=2048)
-                    return self.parse_refine_additional(text)
+                    parsed = self.parse_refine_additional(text)
+                    if artifact_sink is not None:
+                        self._record_ai_run(
+                            artifact_sink,
+                            stage="vision_refine_additional",
+                            provider="openai",
+                            model=_OPENAI_VISION_MODEL,
+                            raw_response=text,
+                            parsed_json=parsed,
+                        )
+                    return parsed
                 except Exception:
                     continue
         return empty
 
-    def refine_text_additional(self, raw_text: str, first_cap: dict[str, Any]) -> dict[str, Any]:
+    def refine_text_additional(
+        self,
+        raw_text: str,
+        first_cap: dict[str, Any],
+        *,
+        artifact_sink: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         known = first_cap.get("cpts") or []
         prompt = _REFINE_TEXT_PROMPT.format(known_json=json.dumps(known)) + "\n\nText:\n" + raw_text[:8000]
         empty = {"cpts": [], "lines": [], "service_date": None, "patient_name": None, "mrn": None}
@@ -833,13 +1428,33 @@ class RvuCptExtractionService:
             if stage == "anthropic" and self.anthropic_api_key:
                 try:
                     text = self.anthropic_text_once(prompt, max_tokens=4096)
-                    return self.parse_refine_additional(text)
+                    parsed = self.parse_refine_additional(text)
+                    if artifact_sink is not None:
+                        self._record_ai_run(
+                            artifact_sink,
+                            stage="text_refine_additional",
+                            provider="anthropic",
+                            model=self.text_model,
+                            raw_response=text,
+                            parsed_json=parsed,
+                        )
+                    return parsed
                 except Exception:
                     continue
             if stage == "openai" and self.openai_api_key:
                 try:
                     text = self.openai_text_once(prompt, max_tokens=4096)
-                    return self.parse_refine_additional(text)
+                    parsed = self.parse_refine_additional(text)
+                    if artifact_sink is not None:
+                        self._record_ai_run(
+                            artifact_sink,
+                            stage="text_refine_additional",
+                            provider="openai",
+                            model=_OPENAI_TEXT_MODEL,
+                            raw_response=text,
+                            parsed_json=parsed,
+                        )
+                    return parsed
                 except Exception:
                     continue
         return empty
@@ -892,6 +1507,22 @@ class RvuCptExtractionService:
                 pass
         return None
 
+    def parse_demographics_response(self, text: str) -> dict[str, Any]:
+        obj = self._extract_json_object(text)
+        if not obj:
+            return {"cpts": [], "service_date": None, "patient_name": None, "mrn": None, "surgeon_name": None, "lines": []}
+        sd, mrn = _service_date_and_mrn_from_model(obj, text)
+        patient_name = _patient_name_from_model(obj, text)
+        surgeon_name = str(obj.get("surgeon_name") or "").strip() or None
+        return {
+            "cpts": [],
+            "service_date": sd,
+            "patient_name": patient_name,
+            "mrn": mrn,
+            "surgeon_name": surgeon_name,
+            "lines": [],
+        }
+
     def parse_capture_response(self, text: str) -> dict[str, Any]:
         """
         Returns { cpts, service_date, mrn, surgeon_name, lines }.
@@ -899,21 +1530,16 @@ class RvuCptExtractionService:
         obj = self._extract_json_object(text)
         lines: list[dict[str, Any]] = []
         cpts: list[str] = []
-        seen_lines: set[tuple[str, str, str, bool, str]] = set()
+        seen_lines: dict[tuple[str, str, str, bool, str], list[int]] = {}
         if obj:
             raw_lines = obj.get("lines") or []
 
             for row in raw_lines:
                 if not isinstance(row, dict):
                     continue
-                line = _line_from_row(row)
-                if not line:
+                line, dropped = _append_or_merge_line(lines, seen_lines, row)
+                if dropped or not line:
                     continue
-                key = _line_dedupe_key(line)
-                if key in seen_lines:
-                    continue
-                seen_lines.add(key)
-                lines.append(line)
 
             # Some models return a top-level "cpts" array without filling "lines"
             raw_cpts = obj.get("cpts")
@@ -976,6 +1602,7 @@ class RvuCptExtractionService:
         return {"cpts": [], "service_date": None, "patient_name": None, "mrn": None, "surgeon_name": None, "lines": []}
 
     def _stream_vision_openai(self, image_jpeg_bytes: bytes):
+        artifacts: list[dict[str, Any]] = []
         b64 = base64.b64encode(image_jpeg_bytes).decode()
         try:
             text = self.openai_generate_once(_STRUCTURE_PROMPT, b64)
@@ -985,18 +1612,37 @@ class RvuCptExtractionService:
         if text:
             yield "token", text
         merged = self.parse_capture_response(text)
+        self._record_ai_run(
+            artifacts,
+            stage="vision_primary",
+            provider="openai",
+            model=_OPENAI_VISION_MODEL,
+            raw_response=text,
+            parsed_json=merged,
+        )
         if not self._has_provider_context(merged):
             try:
                 yield "token", "\n[OpenAI table OCR pass]"
                 text2 = self.openai_generate_once(_TABLE_FOCUS_PROMPT, b64)
                 if text2:
                     yield "token", text2
-                merged = self.merge_captures(merged, self.parse_capture_response(text2))
+                parsed2 = self.parse_capture_response(text2)
+                self._record_ai_run(
+                    artifacts,
+                    stage="vision_table_focus",
+                    provider="openai",
+                    model=_OPENAI_VISION_MODEL,
+                    raw_response=text2,
+                    parsed_json=parsed2,
+                )
+                merged = self.merge_captures(merged, parsed2)
             except Exception:
                 pass
+        merged["_ai_runs"] = artifacts
         yield "done", merged
 
     def _stream_vision_anthropic(self, image_jpeg_bytes: bytes):
+        artifacts: list[dict[str, Any]] = []
         b64 = base64.b64encode(image_jpeg_bytes).decode()
         try:
             text = self.anthropic_generate_once(_STRUCTURE_PROMPT, b64)
@@ -1006,15 +1652,33 @@ class RvuCptExtractionService:
         if text:
             yield "token", text
         merged = self.parse_capture_response(text)
+        self._record_ai_run(
+            artifacts,
+            stage="vision_primary",
+            provider="anthropic",
+            model=self.vision_model,
+            raw_response=text,
+            parsed_json=merged,
+        )
         if not self._has_provider_context(merged):
             try:
                 yield "token", "\n[Anthropic table OCR pass]"
                 text2 = self.anthropic_generate_once(_TABLE_FOCUS_PROMPT, b64)
                 if text2:
                     yield "token", text2
-                merged = self.merge_captures(merged, self.parse_capture_response(text2))
+                parsed2 = self.parse_capture_response(text2)
+                self._record_ai_run(
+                    artifacts,
+                    stage="vision_table_focus",
+                    provider="anthropic",
+                    model=self.vision_model,
+                    raw_response=text2,
+                    parsed_json=parsed2,
+                )
+                merged = self.merge_captures(merged, parsed2)
             except Exception:
                 pass
+        merged["_ai_runs"] = artifacts
         yield "done", merged
 
     def stream_vision(self, image_jpeg_bytes: bytes, scan_mode: str = "balanced"):
@@ -1080,6 +1744,7 @@ class RvuCptExtractionService:
         yield "error", final_err
 
     def stream_text(self, raw_text: str):
+        artifacts: list[dict[str, Any]] = []
         prompt = _TEXT_STRUCTURE_PROMPT.format(raw_text=raw_text[:8000])
         errs: list[str] = []
         for stage in _RVU_VISION_PIPELINE:
@@ -1088,7 +1753,17 @@ class RvuCptExtractionService:
                     text = self.anthropic_text_once(prompt, max_tokens=4096)
                     for i in range(0, len(text), 100):
                         yield "token", text[i : i + 100]
-                    yield "done", self.parse_capture_response(text)
+                    parsed = self.parse_capture_response(text)
+                    self._record_ai_run(
+                        artifacts,
+                        stage="text_primary",
+                        provider="anthropic",
+                        model=self.text_model,
+                        raw_response=text,
+                        parsed_json=parsed,
+                    )
+                    parsed["_ai_runs"] = artifacts
+                    yield "done", parsed
                     return
                 except Exception as exc:
                     errs.append(f"Anthropic: {exc}")
@@ -1098,7 +1773,17 @@ class RvuCptExtractionService:
                     text = self.openai_text_once(prompt, max_tokens=4096)
                     for i in range(0, len(text), 100):
                         yield "token", text[i : i + 100]
-                    yield "done", self.parse_capture_response(text)
+                    parsed = self.parse_capture_response(text)
+                    self._record_ai_run(
+                        artifacts,
+                        stage="text_primary",
+                        provider="openai",
+                        model=_OPENAI_TEXT_MODEL,
+                        raw_response=text,
+                        parsed_json=parsed,
+                    )
+                    parsed["_ai_runs"] = artifacts
+                    yield "done", parsed
                     return
                 except Exception as exc:
                     errs.append(f"OpenAI: {exc}")
