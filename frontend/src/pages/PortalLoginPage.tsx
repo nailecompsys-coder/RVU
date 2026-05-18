@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 
 export default function PortalLoginPage() {
@@ -96,21 +96,6 @@ export default function PortalLoginPage() {
         <p className="text-center text-xs text-ink-secondary mt-5">
           Use your RVU portal username and password (practice managers / office staff).
         </p>
-
-        <div className="card p-5 mt-6 border border-brand-border">
-          <p className="text-xs font-bold text-ink uppercase tracking-wide mb-2">Clinical staff</p>
-          <p className="text-sm text-ink-secondary leading-relaxed mb-4">
-            You don’t log in here. Use the <strong className="text-ink">magic link</strong> from your admin to register this phone or computer, then open the scanner or your workspace.
-          </p>
-          <div className="flex flex-col gap-2">
-            <Link to="/register" className="btn-secondary text-sm py-2.5 justify-center text-center">
-              Register with magic link
-            </Link>
-            <Link to="/staff" className="text-xs text-brand-blue text-center hover:underline">
-              My workspace (after you’re registered)
-            </Link>
-          </div>
-        </div>
       </div>
     </div>
   );

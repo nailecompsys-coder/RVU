@@ -1362,6 +1362,7 @@ class LineItemIn(BaseModel):
     provider_role: str = "unknown"
     modifier: str = ""
     is_assist: bool = False
+    line_service_date: str = ""
 
 
 class CommitBody(BaseModel):
@@ -2070,6 +2071,7 @@ def staff_pending_scans(
 class ScanPatchBody(BaseModel):
     cpts: Optional[list[str]] = None
     modifiers: dict[str, str] = Field(default_factory=dict)
+    lines: Optional[list[LineItemIn]] = None
     service_date: Optional[str] = None
     patient_name: Optional[str] = None
     mrn: Optional[str] = None
@@ -2568,8 +2570,9 @@ def patch_scan(
     cf_val = body.cf if body.cf is not None else (scan.cf or APP_CF_DEFAULT)
     _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
     existing_lines = _parse_line_items(scan.line_items)
+    request_lines = [line.model_dump() for line in body.lines] if body.lines is not None else None
     if clean:
-        line_source = _select_line_items_for_cpts(existing_lines, clean, body.modifiers)
+        line_source = request_lines if request_lines is not None else _select_line_items_for_cpts(existing_lines, clean, body.modifiers)
         rows, total = (
             payment_svc.build_rows_from_lines(
                 line_source,

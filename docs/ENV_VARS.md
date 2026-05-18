@@ -36,6 +36,7 @@ This is the canonical env contract for RVU across local and production.
 | `RVU_LOCK_LOCAL_ONLY` | `true` | Limit local behavior as configured by app |
 | `RVU_DEFAULT_CF` | `41.0` | Conversion factor fallback |
 | `RVU_BUILD_ID` | _(unset)_ | Optional deploy label exposed in `GET /api/version` (build number, image tag, etc.) |
+| `RVU_OTP_DEV_CODE` | `false` | Local-only helper. When true, staff OTP request returns `dev_code=123456`; keep false in production. |
 
 ## Version endpoint
 

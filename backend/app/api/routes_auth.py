@@ -33,6 +33,7 @@ _email_executor = ThreadPoolExecutor(max_workers=2)
 _otp_lock = Lock()
 _staff_otp_store: dict[str, dict[str, object]] = {}
 _OTP_EXPIRE_MINUTES = int(os.environ.get("RVU_OTP_EXPIRE_MINUTES", "10"))
+_OTP_DEV_CODE = os.environ.get("RVU_OTP_DEV_CODE", "false").lower() in ("1", "true", "yes")
 
 BASE_URL = os.environ.get("BASE_URL", "https://rvu.midfloridasurgical.com")
 
@@ -108,8 +109,12 @@ def staff_request_otp(body: StaffOtpRequestBody, db: Session = Depends(get_db)):
         .filter(RvuStaff.email == email, RvuStaff.is_active == True)  # noqa: E712
         .first()
     )
+    dev_code = None
     if surgeon and surgeon.email:
         code = f"{secrets.randbelow(1000000):06d}"
+        if _OTP_DEV_CODE:
+            code = "123456"
+            dev_code = code
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=_OTP_EXPIRE_MINUTES)
         with _otp_lock:
             _prune_expired_staff_otps()
@@ -146,6 +151,8 @@ def staff_request_otp(body: StaffOtpRequestBody, db: Session = Depends(get_db)):
                 ),
             )
     response = {"ok": True, "message": "If that email is registered, a code was sent."}
+    if dev_code:
+        response["dev_code"] = dev_code
     return response
 
 

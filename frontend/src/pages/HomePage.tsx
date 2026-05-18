@@ -1,39 +1,11 @@
-import { useEffect, useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
-import { api, hasStaffSession } from "../api/client";
+import { Link } from "react-router-dom";
 
 /**
  * Root `/` must not send office users to staff registration.
- * - Saved staff JWT → scanner immediately.
- * - Otherwise: choose Portal (username/password) vs clinical staff flow.
+ * The browser portal is practice-office only; clinical capture now happens in
+ * the native mobile app.
  */
 export default function HomePage() {
-  const nav = useNavigate();
-  const [dest, setDest] = useState<"/capture" | null>(null);
-  const [staffBusy, setStaffBusy] = useState(false);
-
-  useEffect(() => {
-    if (hasStaffSession()) {
-      setDest("/capture");
-    }
-  }, []);
-
-  const continueStaff = async () => {
-    setStaffBusy(true);
-    try {
-      await api.meStaff();
-      setDest("/capture");
-    } catch {
-      nav("/register", { replace: true });
-    } finally {
-      setStaffBusy(false);
-    }
-  };
-
-  if (dest) {
-    return <Navigate to={dest} replace />;
-  }
-
   return (
     <div className="min-h-dvh bg-brand-gradient-v flex items-center justify-center px-4 py-10">
       <div className="w-full max-w-md">
@@ -56,26 +28,6 @@ export default function HomePage() {
           <Link to="/portal/login" className="btn-primary w-full py-3.5 text-center block text-base">
             Portal login
           </Link>
-        </div>
-
-        <div className="card p-6 border border-brand-border">
-          <p className="label mb-3">Clinical staff</p>
-          <p className="text-sm text-ink-secondary mb-4">
-            Use the registration link from your office on this phone or computer, then open the scanner.
-          </p>
-          <div className="flex flex-col gap-2">
-            <button
-              type="button"
-              disabled={staffBusy}
-              onClick={() => void continueStaff()}
-              className="btn-primary w-full py-3 text-sm"
-            >
-              {staffBusy ? "Checking…" : "Continue to scanner"}
-            </button>
-            <Link to="/register" className="btn-secondary w-full py-2.5 text-sm text-center">
-              Register with magic link
-            </Link>
-          </div>
         </div>
       </div>
     </div>
