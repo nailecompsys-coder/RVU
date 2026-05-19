@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Uploa
 from typing import Optional
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, func, or_
+from sqlalchemy import case, desc, func, or_
 from sqlalchemy.orm import Session
 
 from app.models_identity import RvuStaff
@@ -1238,6 +1238,43 @@ def _run_vision_capture(
 def localities():
     """Public — static CMS GPCI/fee-schedule data, no PII."""
     return payment_svc.localities_payload()
+
+
+@router.get("/providers")
+def list_providers(
+    db: Session = Depends(get_db),
+    _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
+):
+    """Return active providers for fast native charge assignment."""
+
+    def _role_for_staff(staff_type: str | None) -> str:
+        value = str(staff_type or "").strip().lower()
+        if value in {"pa", "physician_assistant", "assistant"}:
+            return "pa"
+        return "surgeon"
+
+    role_order = case(
+        (RvuStaff.staff_type.ilike("physician"), 0),
+        (RvuStaff.staff_type.ilike("pa"), 1),
+        else_=2,
+    )
+    providers = (
+        db.query(RvuStaff)
+        .filter(RvuStaff.is_active == True)  # noqa: E712
+        .order_by(role_order, RvuStaff.last_name, RvuStaff.first_name)
+        .all()
+    )
+    return {
+        "providers": [
+            {
+                "id": s.id,
+                "full_name": s.full_name,
+                "staff_type": s.staff_type,
+                "provider_role": _role_for_staff(s.staff_type),
+            }
+            for s in providers
+        ]
+    }
 
 
 class LookupBody(BaseModel):
@@ -2683,6 +2720,7 @@ def delete_scan(
     ).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    db.query(RvuScanAiRun).filter(RvuScanAiRun.scan_id == scan_id).delete(synchronize_session=False)
     db.delete(scan)
     db.commit()
     return Response(status_code=204)
