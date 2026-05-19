@@ -1249,13 +1249,14 @@ def list_providers(
 
     def _role_for_staff(staff_type: str | None) -> str:
         value = str(staff_type or "").strip().lower()
-        if value in {"pa", "physician_assistant", "assistant"}:
+        if value in {"pa", "physician_assistant", "assistant", "staff"}:
             return "pa"
         return "surgeon"
 
     role_order = case(
         (RvuStaff.staff_type.ilike("physician"), 0),
         (RvuStaff.staff_type.ilike("pa"), 1),
+        (RvuStaff.staff_type.ilike("staff"), 1),
         else_=2,
     )
     providers = (
