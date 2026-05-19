@@ -4,7 +4,7 @@ set -euo pipefail
 TARGET_REF="${1:-main}"
 REPO_URL="git@github.com:nailecompsys-coder/rvu-api.git"
 SRC_DIR="/home/dnaile748/deploy-src/rvu-api"
-LIVE_DIR="/home/dnaile748/rvu"
+LIVE_DIR="${RVU_LIVE_DIR:-/opt/rvu}"
 LIVE_BACKEND_DIR="${LIVE_DIR}/backend"
 BACKUP_DIR="${LIVE_DIR}/deploy/backups"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"

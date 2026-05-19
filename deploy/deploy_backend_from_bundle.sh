@@ -3,10 +3,10 @@ set -euo pipefail
 
 BUNDLE_PATH="${1:-}"
 DEPLOY_SHA="${2:-unknown}"
-LIVE_DIR="/home/dnaile748/rvu"
+LIVE_DIR="${RVU_LIVE_DIR:-/opt/rvu}"
 LIVE_BACKEND_DIR="${LIVE_DIR}/backend"
 BACKUP_DIR="${LIVE_DIR}/deploy/backups"
-TMP_DIR="/home/dnaile748/rvu/deploy/tmp"
+TMP_DIR="${LIVE_DIR}/deploy/tmp"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 HEALTH_URL="http://127.0.0.1:3010/api/health"
 HEALTH_ATTEMPTS=120
