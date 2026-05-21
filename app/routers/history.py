@@ -27,7 +27,6 @@ def history_page(
         db.query(RvuScan)
         .filter(RvuScan.surgeon_id == surgeon.id)
         .order_by(desc(RvuScan.scanned_at))
-        .limit(100)
         .all()
     )
     return _history_html(surgeon, scans)

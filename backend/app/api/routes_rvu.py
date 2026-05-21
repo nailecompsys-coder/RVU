@@ -301,6 +301,33 @@ def _review_reason_from_scan_fields(
     return None
 
 
+def _capture_gate_review_reason(cap: dict, payload: dict) -> str | None:
+    """Classify captures that should not be treated as normal charge screens.
+
+    This is deliberately conservative: it does not reject a scan just because one
+    field is missing. It only flags combinations that the exported production
+    dataset showed are usually non-charge/noisy screens.
+    """
+    cpts = [str(cpt or "").strip() for cpt in (payload.get("cpts") or cap.get("cpts") or []) if str(cpt or "").strip()]
+    lines = [line for line in (cap.get("lines") or []) if isinstance(line, dict)]
+    patient_name = str(cap.get("patient_name") or payload.get("patient_name") or "").strip()
+    mrn = str(_normalized_mrn_or_none(cap.get("mrn") or payload.get("mrn")) or "").strip()
+    service_date = payment_svc.parse_service_date(cap.get("service_date") or payload.get("service_date"))
+    has_provider = any(str(line.get("provider_name") or "").strip() for line in lines)
+
+    if not cpts and not patient_name and not mrn:
+        return "Retake: this does not look like a charge capture screen"
+    if not cpts:
+        return "Retake or manual entry: no CPT charge line found"
+    if cpts and not patient_name and not mrn:
+        return "Confirm patient/MRN: charge found but patient banner was not readable"
+    if cpts and not service_date:
+        return "Confirm date of service"
+    if len(lines) > 1 and not has_provider:
+        return "Confirm providers for multi-line capture"
+    return None
+
+
 def _get_scan_review_reason(scan: RvuScan) -> str | None:
     return scan.review_reason or _review_reason_from_scan_fields(
         main_cpt=scan.main_cpt,
@@ -636,6 +663,66 @@ def _provider_mentions_other_physician(provider: str, other: RvuStaff, anchor: R
     return False
 
 
+def _provider_role_for_staff(staff: RvuStaff | None) -> str:
+    value = str(getattr(staff, "staff_type", "") or "").strip().lower()
+    if value in {"pa", "physician_assistant", "assistant", "staff"}:
+        return "pa"
+    return "surgeon"
+
+
+def _provider_name_key(value: str | None) -> str:
+    cleaned = re.sub(r"\bdr\.?\b", " ", str(value or ""), flags=re.I)
+    cleaned = re.sub(r"\b(pa|pa-c|physician assistant|md|do)\b", " ", cleaned, flags=re.I)
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", cleaned.lower())).strip()
+
+
+def _provider_exactly_matches_staff(provider_name: str, staff: RvuStaff) -> bool:
+    key = _provider_name_key(provider_name)
+    if not key:
+        return False
+    full = _provider_name_key(staff.full_name)
+    first = _provider_name_key(staff.first_name)
+    last = _provider_name_key(staff.last_name)
+    if key == full:
+        return True
+    # Hospital text may include a middle name/initial; require both first and last tokens.
+    tokens = set(key.split())
+    return bool(first and last and first in tokens and last in tokens)
+
+
+def _canonicalize_provider_lines(
+    db: Session,
+    lines: list[dict],
+    *,
+    anchor: RvuStaff,
+) -> list[dict]:
+    """Normalize OCR/provider text to active staff names without accepting last-name-only mistakes."""
+    if not lines:
+        return lines
+    active_staff = db.query(RvuStaff).filter(RvuStaff.is_active == True).all()  # noqa: E712
+    out: list[dict] = []
+    for line in lines:
+        if not isinstance(line, dict):
+            out.append(line)
+            continue
+        item = dict(line)
+        role = str(item.get("provider_role") or "unknown").strip().lower()
+        provider_name = str(item.get("provider_name") or "").strip()
+        is_assist = bool(item.get("is_assist")) or role in ("pa", "assistant") or "AS" in str(item.get("modifier") or "").upper()
+
+        matched = next((staff for staff in active_staff if _provider_exactly_matches_staff(provider_name, staff)), None)
+        if matched is not None:
+            item["provider_name"] = matched.full_name
+            item["provider_role"] = _provider_role_for_staff(matched)
+        elif not is_assist:
+            # The scan owner is the safest default for surgeon lines when OCR invents or misreads
+            # a provider name. This prevents "James Johnson" from being saved for Christopher Johnson.
+            item["provider_name"] = anchor.full_name
+            item["provider_role"] = _provider_role_for_staff(anchor)
+        out.append(item)
+    return out
+
+
 def _maybe_fanout_charge_capture_for_other_surgeons(
     db: Session,
     *,
@@ -827,7 +914,11 @@ def _apply_pending_scan_result(
     rows = payload["rows"]
     total = payload["total_payment"]
     loc_name = payment_svc.locality_name(locality)
-    enriched = payment_svc.enrich_line_items(rows, cap.get("lines"))
+    surgeon = db.get(RvuStaff, scan.surgeon_id)
+    source_lines = cap.get("lines")
+    if surgeon is not None and isinstance(source_lines, list):
+        source_lines = _canonicalize_provider_lines(db, source_lines, anchor=surgeon)
+    enriched = payment_svc.enrich_line_items(rows, source_lines)
     main_cpt, main_cpt_status = _main_cpt_summary(cap, payload)
     synced = _cpts_for_surgeon_lines(enriched)
     scan.cpts = json.dumps(synced if synced else (payload.get("cpts") or []))
@@ -880,11 +971,15 @@ def _persist_capture_result(
     elapsed: float,
     image_bytes: bytes | None = None,
     client_request_id: str | None = None,
+    review_reason_override: str | None = None,
 ) -> RvuScan:
     rows = payload["rows"]
     total = payload["total_payment"]
     loc_name = payment_svc.locality_name(locality)
-    enriched = payment_svc.enrich_line_items(rows, cap.get("lines"))
+    source_lines = cap.get("lines")
+    if isinstance(source_lines, list):
+        source_lines = _canonicalize_provider_lines(db, source_lines, anchor=surgeon)
+    enriched = payment_svc.enrich_line_items(rows, source_lines)
     main_cpt, main_cpt_status = _main_cpt_summary(cap, payload)
     synced_cpts = _cpts_for_surgeon_lines(enriched)
     if not synced_cpts:
@@ -910,17 +1005,21 @@ def _persist_capture_result(
         scan_status="pending_review",
         main_cpt=main_cpt,
         main_cpt_status=main_cpt_status,
-        review_reason=_review_reason_from_scan_fields(
-            main_cpt=main_cpt,
-            main_cpt_status=main_cpt_status,
-            patient_name=cap.get("patient_name"),
-            mrn=_normalized_mrn_or_none(cap.get("mrn")),
-            service_date=payment_svc.parse_service_date(cap.get("service_date")),
+        review_reason=(
+            review_reason_override
+            if review_reason_override is not None
+            else _review_reason_from_scan_fields(
+                main_cpt=main_cpt,
+                main_cpt_status=main_cpt_status,
+                patient_name=cap.get("patient_name"),
+                mrn=_normalized_mrn_or_none(cap.get("mrn")),
+                service_date=payment_svc.parse_service_date(cap.get("service_date")),
+            )
         ),
         client_request_id=client_request_id,
     )
     _persist_ai_runs(db, scan, cap)
-    _maybe_fanout_charge_capture_for_other_surgeons(db, scan=scan, cap_lines=cap.get("lines") if isinstance(cap.get("lines"), list) else None)
+    _maybe_fanout_charge_capture_for_other_surgeons(db, scan=scan, cap_lines=source_lines if isinstance(source_lines, list) else None)
     return scan
 
 
@@ -1120,7 +1219,7 @@ def _run_text_capture(
     event_cb: Callable[[str, str], None] | None = None,
 ) -> tuple[dict, dict, float, str]:
     t_start = datetime.now(timezone.utc)
-    print(f"[text_capture] raw_text ({len(raw_text)} chars):\n{raw_text[:2000]}", flush=True)
+    log.info("text_capture_received chars=%s", len(raw_text or ""))
     cap: dict = {"cpts": [], "service_date": None, "patient_name": None, "mrn": None, "lines": []}
     if event_cb:
         event_cb("status", "Sending text to AI…")
@@ -1224,6 +1323,10 @@ def _run_vision_capture(
         modifier_rules=modifier_rules,
     )
     payload["vision_backend"] = vision_backend
+    gate_reason = _capture_gate_review_reason(cap, payload)
+    if gate_reason:
+        payload["capture_gate"] = "needs_review"
+        payload["capture_gate_reason"] = gate_reason
     log.info(
         "vision_capture_done backend=%s mode=%s elapsed=%.2fs cpts=%s",
         vision_backend,
@@ -1443,6 +1546,8 @@ async def commit_scan(
 
     fac = facility.lower() == "true"
     line_dicts = json.loads(lines)
+    if isinstance(line_dicts, list):
+        line_dicts = _canonicalize_provider_lines(db, line_dicts, anchor=surgeon)
     _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
     rows, total = (
         payment_svc.build_rows_from_lines(
@@ -1824,6 +1929,7 @@ async def vision_scan(
     )
     saved_scan = None
     if do_persist:
+        gate_reason = _capture_gate_review_reason(cap, payload)
         saved_scan = _apply_pending_scan_result(
             db=db,
             scan=pending_scan,
@@ -1836,6 +1942,7 @@ async def vision_scan(
             image_kb=small_kb,
             elapsed=elapsed,
             verified=False,
+            review_reason_override=gate_reason,
         )
     return _finalize_capture_response(
         payload=payload,
@@ -1976,6 +2083,7 @@ async def vision_stream(
         )
         saved_scan = None
         if do_persist:
+            gate_reason = _capture_gate_review_reason(cap, payload)
             saved_scan = _persist_capture_result(
                 db=db,
                 surgeon=surgeon,
@@ -1989,6 +2097,7 @@ async def vision_stream(
                 elapsed=elapsed,
                 image_bytes=image_bytes,
                 client_request_id=client_request_id,
+                review_reason_override=gate_reason,
             )
         yield _sse(
             "done",
@@ -2082,9 +2191,8 @@ def staff_history(
     surgeon, _ = auth
     scans = (
         db.query(RvuScan)
-        .filter(RvuScan.surgeon_id == surgeon.id, RvuScan.scan_status == "verified")
+        .filter(RvuScan.surgeon_id == surgeon.id, RvuScan.scan_status != "pending_processing")
         .order_by(desc(RvuScan.scanned_at))
-        .limit(100)
         .all()
     )
     return {"scans": [_scan_history_dict(s, surgeon) for s in scans]}
@@ -2100,7 +2208,6 @@ def staff_pending_scans(
         db.query(RvuScan)
         .filter(RvuScan.surgeon_id == surgeon.id, RvuScan.scan_status == "pending_review")
         .order_by(desc(RvuScan.scanned_at))
-        .limit(100)
         .all()
     )
     return {"scans": [_entry_row_dict(s, surgeon) for s in scans]}
@@ -2264,6 +2371,12 @@ def _build_day_summaries(
 
 
 def _period_bounds(range_key: str, today: date) -> tuple[date, date, date, date]:
+    if range_key == "day":
+        start = today
+        end = today
+        prev_start = today - timedelta(days=1)
+        prev_end = prev_start
+        return start, end, prev_start, prev_end
     if range_key == "week":
         start = today - timedelta(days=6)
         end = today
@@ -2500,8 +2613,8 @@ def staff_stats(
     surgeon, _ = auth
     settings = _get_or_create_user_settings(db, surgeon.id)
     range_key = (range or "month").strip().lower()
-    if range_key not in {"week", "month", "ytd"}:
-        raise HTTPException(status_code=400, detail="Range must be week, month, or ytd")
+    if range_key not in {"day", "week", "month", "ytd"}:
+        raise HTTPException(status_code=400, detail="Range must be day, week, month, or ytd")
     all_scans = _load_staff_scans(db, surgeon.id)
     today = datetime.now().date()
     start, end, prev_start, prev_end = _period_bounds(range_key, today)
@@ -2515,12 +2628,20 @@ def staff_stats(
         for scan in all_scans
         if _is_verified_scan(scan) and (effective := _effective_scan_date(scan)) and prev_start <= effective <= prev_end
     ]
+    pending_count = sum(
+        1
+        for scan in all_scans
+        if (scan.scan_status or "") == "pending_review"
+        and (effective := _effective_scan_date(scan))
+        and start <= effective <= end
+    )
     cases = len(period_scans)
     wrvu_total = _sum_wrvu(period_scans)
     previous_cases = len(previous_scans)
     previous_wrvu = _sum_wrvu(previous_scans)
     return {
         "range": range_key,
+        "pending_count": pending_count,
         "cases": cases,
         "wrvu_total": wrvu_total,
         "estimated_compensation": round(wrvu_total * float(settings.cf or APP_CF_DEFAULT), 2),
@@ -2609,8 +2730,12 @@ def patch_scan(
     _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
     existing_lines = _parse_line_items(scan.line_items)
     request_lines = [line.model_dump() for line in body.lines] if body.lines is not None else None
+    if request_lines is not None:
+        request_lines = _canonicalize_provider_lines(db, request_lines, anchor=surgeon)
     if clean:
         line_source = request_lines if request_lines is not None else _select_line_items_for_cpts(existing_lines, clean, body.modifiers)
+        if line_source and request_lines is None:
+            line_source = _canonicalize_provider_lines(db, line_source, anchor=surgeon)
         rows, total = (
             payment_svc.build_rows_from_lines(
                 line_source,
