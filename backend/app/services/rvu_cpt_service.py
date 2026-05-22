@@ -182,6 +182,9 @@ Return ONE JSON object only (no markdown): {{"additional_lines": [], "patient_na
 _TABLE_FOCUS_PROMPT = """Read this hospital charge screenshot as a TABLE.
 
 Scan full width and full height, left-to-right and top-to-bottom.
+Always read the patient banner/header separately from the charge table. If the header shows a
+patient name, MRN, account number, or service date, return those fields even if the charge rows
+are too blurry or cropped to read.
 Pay special attention to columns:
 - Code
 - Description
@@ -1564,11 +1567,18 @@ class RvuCptExtractionService:
                         )
 
             cpts = _cpts_for_surgeon_lines(lines)
-            if cpts or lines:
-                sd, mrn = _service_date_and_mrn_from_model(obj, text)
-                patient_name = _patient_name_from_model(obj, text)
-                surgeon_name = str((obj or {}).get("surgeon_name") or "").strip()
-                return {"cpts": cpts, "service_date": sd, "patient_name": patient_name, "mrn": mrn, "surgeon_name": surgeon_name or None, "lines": lines}
+            sd, mrn = _service_date_and_mrn_from_model(obj, text)
+            patient_name = _patient_name_from_model(obj, text)
+            surgeon_name = str((obj or {}).get("surgeon_name") or "").strip()
+            if cpts or lines or sd or mrn or patient_name or surgeon_name:
+                return {
+                    "cpts": cpts,
+                    "service_date": sd,
+                    "patient_name": patient_name,
+                    "mrn": mrn,
+                    "surgeon_name": surgeon_name or None,
+                    "lines": lines,
+                }
 
         # Recover cpt fields from messy / truncated JSON in the raw model string
         seen_surgeon_cpts: set[str] = set()
