@@ -665,7 +665,10 @@ def _provider_mentions_other_physician(provider: str, other: RvuStaff, anchor: R
 
 def _provider_role_for_staff(staff: RvuStaff | None) -> str:
     value = str(getattr(staff, "staff_type", "") or "").strip().lower()
-    if value in {"pa", "physician_assistant", "assistant", "staff"}:
+    suffix = str(getattr(staff, "suffix", "") or "").strip().lower()
+    if value in {"pa", "pa-c", "physician_assistant", "physician assistant", "assistant"}:
+        return "pa"
+    if value == "staff" and ("pa" in suffix or "physician assistant" in suffix):
         return "pa"
     return "surgeon"
 
@@ -1352,19 +1355,24 @@ def list_providers(
 
     def _role_for_staff(staff_type: str | None) -> str:
         value = str(staff_type or "").strip().lower()
-        if value in {"pa", "physician_assistant", "assistant", "staff"}:
+        if value in {"pa", "pa-c", "physician_assistant", "physician assistant", "assistant"}:
             return "pa"
         return "surgeon"
 
     role_order = case(
         (RvuStaff.staff_type.ilike("physician"), 0),
         (RvuStaff.staff_type.ilike("pa"), 1),
-        (RvuStaff.staff_type.ilike("staff"), 1),
         else_=2,
     )
     providers = (
         db.query(RvuStaff)
-        .filter(RvuStaff.is_active == True)  # noqa: E712
+        .filter(
+            RvuStaff.is_active == True,  # noqa: E712
+            or_(
+                RvuStaff.staff_type.in_(("physician", "pa", "physician_assistant")),
+                RvuStaff.suffix.ilike("%PA%"),
+            ),
+        )
         .order_by(role_order, RvuStaff.last_name, RvuStaff.first_name)
         .all()
     )

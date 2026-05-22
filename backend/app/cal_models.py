@@ -56,7 +56,7 @@ class Surgeon(Base):
     last_name = Column(String(64), nullable=False)
     specialty = Column(String(128))
     suffix = Column(String(32))   # MD, DO, MD FACS, PA-C, NP, etc.
-    staff_type = Column(String(16), default="physician", server_default="physician")  # physician | staff
+    staff_type = Column(String(16), default="physician", server_default="physician")  # physician | pa | staff
     email = Column(String(255), unique=True)
     phone = Column(String(32))
     color = Column(String(16), default="#3b82f6")  # hex color for calendar

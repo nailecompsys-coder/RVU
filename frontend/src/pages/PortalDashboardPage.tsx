@@ -23,12 +23,35 @@ const fmt$ = (n: number) =>
 
 /** Physicians first, then other roles; then last / first name. */
 function sortStaffMembers(a: StaffMember, b: StaffMember): number {
-  const rank = (t: string | null | undefined) => (t?.toLowerCase() === "physician" ? 0 : 1);
+  const rank = (t: string | null | undefined) => {
+    const value = t?.toLowerCase();
+    if (value === "physician") return 0;
+    if (value === "pa" || value === "physician_assistant") return 1;
+    return 2;
+  };
   const dr = rank(a.staff_type) - rank(b.staff_type);
   if (dr !== 0) return dr;
   const ln = a.last_name.localeCompare(b.last_name);
   if (ln !== 0) return ln;
   return a.first_name.localeCompare(b.first_name);
+}
+
+const STAFF_ROLE_OPTIONS = [
+  { value: "physician", label: "Physician" },
+  { value: "pa", label: "PA-C" },
+  { value: "staff", label: "Admin Staff" },
+] as const;
+
+function staffRoleLabel(value: string | null | undefined): string {
+  const normalized = value?.trim().toLowerCase();
+  return STAFF_ROLE_OPTIONS.find((option) => option.value === normalized)?.label ?? (value || "—");
+}
+
+function formatUsPhone(value: string | null | undefined): string {
+  const digits = String(value ?? "").replace(/\D/g, "").slice(0, 10);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
 }
 
 function Spinner({ className = "w-4 h-4" }: { className?: string }) {
@@ -453,7 +476,7 @@ export default function PortalDashboardPage() {
 
   const startStaffEdit = (s: StaffMember) => {
     setShowAddForm(false); setStaffEditId(s.id);
-    setStaffDraft({ first_name: s.first_name, last_name: s.last_name, suffix: s.suffix ?? "", staff_type: s.staff_type ?? "physician", email: s.email ?? "", phone: s.phone ?? "", is_active: s.is_active });
+    setStaffDraft({ first_name: s.first_name, last_name: s.last_name, suffix: s.suffix ?? "", staff_type: s.staff_type ?? "physician", email: s.email ?? "", phone: formatUsPhone(s.phone), is_active: s.is_active });
     setStaffErr(null);
   };
 
@@ -461,7 +484,7 @@ export default function PortalDashboardPage() {
     if (staffEditId === null) return;
     setStaffSaving(true); setStaffErr(null);
     try {
-      const updated = await api.patchStaff(staffEditId, staffDraft);
+      const updated = await api.patchStaff(staffEditId, { ...staffDraft, phone: formatUsPhone(staffDraft.phone) });
       setStaff((prev) =>
         prev.map((s) => (s.id === staffEditId ? { ...s, ...updated } : s)).sort(sortStaffMembers)
       );
@@ -475,7 +498,7 @@ export default function PortalDashboardPage() {
     if (!addDraft.first_name.trim() || !addDraft.last_name.trim()) { setAddErr("First and last name are required."); return; }
     setAddSaving(true); setAddErr(null);
     try {
-      const created = await api.createStaff(addDraft);
+      const created = await api.createStaff({ ...addDraft, phone: formatUsPhone(addDraft.phone) });
       setStaff((prev) => [...prev, created].sort(sortStaffMembers));
       setShowAddForm(false); setAddDraft({ first_name: "", last_name: "", phone: "" });
     } catch (e: unknown) {
@@ -677,7 +700,7 @@ export default function PortalDashboardPage() {
                           <td className={`${TD} font-mono text-xs`}>{s.mrn || "—"}</td>
                           <td className={`${TD} font-semibold text-sm`}>{s.surgeon_name || "—"}</td>
                           <td className={TD}>
-                            {s.staff_type ? <span className="badge bg-indigo-50 text-indigo-600 border border-indigo-200">{s.staff_type}</span> : "—"}
+                            {s.staff_type ? <span className="badge bg-indigo-50 text-indigo-600 border border-indigo-200">{staffRoleLabel(s.staff_type)}</span> : "—"}
                           </td>
                           <td className={TD}>
                             {s.facility
@@ -807,8 +830,9 @@ export default function PortalDashboardPage() {
                         type={type ?? "text"}
                         placeholder={placeholder}
                         value={(addDraft[key] as string) ?? ""}
-                        onChange={(e) => setAddDraft((d) => ({ ...d, [key]: e.target.value }))}
+                        onChange={(e) => setAddDraft((d) => ({ ...d, [key]: key === "phone" ? formatUsPhone(e.target.value) : e.target.value }))}
                         className="input text-sm"
+                        inputMode={key === "phone" ? "tel" : undefined}
                       />
                     </div>
                   ))}
@@ -819,8 +843,9 @@ export default function PortalDashboardPage() {
                     value={addDraft.staff_type ?? "physician"}
                     onChange={(e) => setAddDraft((d) => ({ ...d, staff_type: e.target.value }))}
                   >
-                    <option value="physician">Physician</option>
-                    <option value="staff">Staff (PA/NP/etc.)</option>
+                    {STAFF_ROLE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
                   </select>
                 </div>
                 {addErr && <p className="text-red-600 text-xs mb-3">{addErr}</p>}
@@ -856,7 +881,7 @@ export default function PortalDashboardPage() {
                           </td>
                           <td className={TD}>
                             {s.staff_type
-                              ? <span className="badge bg-indigo-50 text-indigo-600 border border-indigo-200">{s.staff_type}</span>
+                              ? <span className="badge bg-indigo-50 text-indigo-600 border border-indigo-200">{staffRoleLabel(s.staff_type)}</span>
                               : <span className="text-ink-secondary">—</span>}
                           </td>
                           <td className={`${TD} text-xs`}>
@@ -866,7 +891,7 @@ export default function PortalDashboardPage() {
                           </td>
                           <td className={`${TD} text-xs`}>
                             {s.phone
-                              ? <a href={`tel:${s.phone}`} className="text-brand-blue hover:underline">{s.phone}</a>
+                              ? <a href={`tel:${String(s.phone).replace(/\D/g, "")}`} className="text-brand-blue hover:underline">{formatUsPhone(s.phone)}</a>
                               : <span className="badge-yellow">⚠ No phone</span>}
                           </td>
                           <td className={TD}>
@@ -899,8 +924,9 @@ export default function PortalDashboardPage() {
                                       type={type ?? "text"}
                                       placeholder={placeholder}
                                       value={(staffDraft[key] as string) ?? ""}
-                                      onChange={(e) => setStaffDraft((d) => ({ ...d, [key]: e.target.value }))}
+                                      onChange={(e) => setStaffDraft((d) => ({ ...d, [key]: key === "phone" ? formatUsPhone(e.target.value) : e.target.value }))}
                                       className="input text-xs"
+                                      inputMode={key === "phone" ? "tel" : undefined}
                                     />
                                   </div>
                                 ))}
@@ -910,8 +936,9 @@ export default function PortalDashboardPage() {
                                     value={staffDraft.staff_type ?? "physician"}
                                     onChange={(e) => setStaffDraft((d) => ({ ...d, staff_type: e.target.value }))}
                                   >
-                                    <option value="physician">Physician</option>
-                                    <option value="staff">Staff (PA/NP/etc.)</option>
+                                    {STAFF_ROLE_OPTIONS.map((option) => (
+                                      <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
                                   </select>
                                 </div>
                                 <div className="flex-none">

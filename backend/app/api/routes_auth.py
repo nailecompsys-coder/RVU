@@ -43,6 +43,42 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 _COOKIE_SECURE = os.environ.get("RVU_COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
 
 
+def _format_us_phone(value: str | None) -> str | None:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if not digits:
+        return None
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    return digits[:32]
+
+
+def _normalize_staff_type(value: str | None) -> str:
+    normalized = str(value or "physician").strip().lower()
+    aliases = {
+        "surgeon": "physician",
+        "doctor": "physician",
+        "pa-c": "pa",
+        "pac": "pa",
+        "physician_assistant": "pa",
+        "physician assistant": "pa",
+        "admin": "staff",
+        "admin_staff": "staff",
+        "admin staff": "staff",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in {"physician", "pa", "staff"} else "staff"
+
+
+def _staff_type_for_response(staff: RvuStaff) -> str | None:
+    staff_type = str(getattr(staff, "staff_type", "") or "").strip().lower()
+    suffix = str(getattr(staff, "suffix", "") or "").strip().lower()
+    if staff_type == "staff" and ("pa" in suffix or "physician assistant" in suffix):
+        return "pa"
+    return getattr(staff, "staff_type", None)
+
+
 class RegisterBody(BaseModel):
     token: str = Field(..., min_length=10)
 
@@ -519,9 +555,10 @@ def list_staff(
     from sqlalchemy import case
 
     physician_first = case(
-        (RvuStaff.staff_type.is_(None), 1),
+        (RvuStaff.staff_type.is_(None), 2),
         (RvuStaff.staff_type.ilike("physician"), 0),
-        else_=1,
+        (RvuStaff.staff_type.ilike("pa"), 1),
+        else_=2,
     )
     surgeons = (
         q.order_by(physician_first, RvuStaff.last_name, RvuStaff.first_name).all()
@@ -533,7 +570,7 @@ def list_staff(
                 "first_name": s.first_name,
                 "last_name": s.last_name,
                 "full_name": s.full_name,
-                "staff_type": s.staff_type,
+                "staff_type": _staff_type_for_response(s),
                 "email": s.email,
                 "phone": s.phone,
                 "suffix": s.suffix,
@@ -570,9 +607,9 @@ def create_staff(
         first_name=body.first_name.strip(),
         last_name=body.last_name.strip(),
         suffix=body.suffix.strip() if body.suffix else None,
-        staff_type=body.staff_type or "physician",
+        staff_type=_normalize_staff_type(body.staff_type),
         email=body.email.strip() if body.email else None,
-        phone=body.phone.strip() if body.phone else None,
+        phone=_format_us_phone(body.phone),
         is_active=True,
     )
     db.add(s)
@@ -583,7 +620,7 @@ def create_staff(
         "first_name": s.first_name,
         "last_name": s.last_name,
         "full_name": s.full_name,
-        "staff_type": s.staff_type,
+        "staff_type": _staff_type_for_response(s),
         "email": s.email,
         "phone": s.phone,
         "suffix": s.suffix,
@@ -622,7 +659,7 @@ def patch_staff(
     if body.suffix is not None:
         s.suffix = body.suffix.strip() or None
     if body.staff_type is not None:
-        s.staff_type = body.staff_type
+        s.staff_type = _normalize_staff_type(body.staff_type)
     if body.email is not None:
         clean_email = body.email.strip() or None
         if clean_email:
@@ -631,7 +668,7 @@ def patch_staff(
                 raise HTTPException(status_code=409, detail="That email is already used by another staff member.")
         s.email = clean_email
     if body.phone is not None:
-        s.phone = body.phone.strip() or None
+        s.phone = _format_us_phone(body.phone)
     if body.is_active is not None:
         s.is_active = body.is_active
 
@@ -642,7 +679,7 @@ def patch_staff(
         "first_name": s.first_name,
         "last_name": s.last_name,
         "full_name": s.full_name,
-        "staff_type": s.staff_type,
+        "staff_type": _staff_type_for_response(s),
         "email": s.email,
         "phone": s.phone,
         "suffix": s.suffix,
