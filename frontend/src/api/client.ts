@@ -65,6 +65,8 @@ export const api = {
   history: () => json<{ scans: ScanRow[] }>("/api/v1/rvu/history"),
   portalScans: (limit = 100, offset = 0) =>
     json<PortalScansResponse>(`/api/v1/portal/rvu/scans?limit=${limit}&offset=${offset}`),
+  portalDashboard: (range = "month", groupBy = "week") =>
+    json<PortalDashboardResponse>(`/api/v1/portal/rvu/dashboard?range=${encodeURIComponent(range)}&group_by=${encodeURIComponent(groupBy)}`),
   portalScanDetail: (id: number) =>
     json<PortalScanRow>(`/api/v1/portal/rvu/scans/${id}`),
   portalScanAiRuns: (id: number) =>
@@ -358,6 +360,56 @@ export type PortalScansResponse = {
   offset: number;
   total_count: number;
   has_more: boolean;
+};
+
+export type PortalDashboardMetric = {
+  patients: number;
+  scans: number;
+  cpt_lines: number;
+  wrvu: number;
+  est_payment: number;
+  avg_wrvu_per_patient: number;
+  active_scanners: number;
+  pending_review: number;
+  missing_mrn: number;
+  missing_service_date: number;
+};
+
+export type PortalDashboardProvider = PortalDashboardMetric & {
+  provider_id: number;
+  provider_name: string;
+  role: string | null;
+  is_active: boolean;
+  last_scan: string | null;
+  top_cpt: string | null;
+};
+
+export type PortalDashboardPeriod = PortalDashboardMetric & {
+  period_key: string;
+  period_label: string;
+};
+
+export type PortalDashboardProviderPeriod = PortalDashboardPeriod & {
+  provider_id: number;
+  provider_name: string;
+};
+
+export type PortalDashboardCpt = {
+  cpt: string;
+  count: number;
+  patients: number;
+  wrvu: number;
+  est_payment: number;
+  providers: number;
+};
+
+export type PortalDashboardResponse = {
+  range: { key: string; start: string; end: string; group_by: string };
+  practice: PortalDashboardMetric & { inactive_scanners: number };
+  providers: PortalDashboardProvider[];
+  periods: PortalDashboardPeriod[];
+  provider_periods: PortalDashboardProviderPeriod[];
+  cpt_mix: PortalDashboardCpt[];
 };
 
 export type PortalScanAiRun = {

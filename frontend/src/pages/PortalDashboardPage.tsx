@@ -4,6 +4,8 @@ import {
   api,
   type DeviceRecord,
   type PortalMe,
+  type PortalDashboardResponse,
+  type PortalDashboardProvider,
   type PortalScanAiRun,
   type PortalScanRow,
   type ScanPatchBody,
@@ -69,6 +71,15 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
       <div className="label mb-1.5">{label}</div>
       <div className="text-2xl font-black text-ink tracking-tight">{value}</div>
       {sub && <div className="text-xs text-ink-secondary mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+function CompactStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border border-brand-border bg-surface px-4 py-3">
+      <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">{label}</div>
+      <div className="mt-1 text-xl font-black text-ink tabular-nums">{value}</div>
     </div>
   );
 }
@@ -145,6 +156,18 @@ function financialBreakdown(scan: PortalScanRow) {
     totalPayment,
     assistCount,
     cptCount: items.length,
+  };
+}
+
+function listFinancialSummary(scan: PortalScanRow): ReturnType<typeof financialBreakdown> {
+  return {
+    items: [],
+    workRvu: Number(scan.work_rvu ?? 0),
+    surgeonValue: Number(scan.surgeon_value ?? 0),
+    facilityShare: Number(scan.facility_share ?? 0),
+    totalPayment: Number(scan.total_payment ?? 0),
+    assistCount: Number(scan.assist_count ?? 0),
+    cptCount: Number(scan.cpt_count ?? 0),
   };
 }
 
@@ -237,11 +260,20 @@ export default function PortalDashboardPage() {
   const [admin, setAdmin] = useState<PortalMe | null>(null);
   const [bootLoading, setBootLoading] = useState(true);
   const [scans, setScans] = useState<PortalScanRow[]>([]);
+  const [hasMoreScans, setHasMoreScans] = useState(false);
+  const [scansLoadingMore, setScansLoadingMore] = useState(false);
+  const [scanLoadErr, setScanLoadErr] = useState<string | null>(null);
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
   const [staffLoaded, setStaffLoaded] = useState(false);
   const [devicesLoaded, setDevicesLoaded] = useState(false);
   const [tab, setTab] = useState<Tab>("scans");
+  const [dashboardRange, setDashboardRange] = useState("month");
+  const [dashboardGroupBy, setDashboardGroupBy] = useState("week");
+  const [dashboard, setDashboard] = useState<PortalDashboardResponse | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardErr, setDashboardErr] = useState<string | null>(null);
+  const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
 
   const [filterSurgeon, setFilterSurgeon] = useState("all");
   const [filterFrom, setFilterFrom] = useState("");
@@ -282,26 +314,18 @@ export default function PortalDashboardPage() {
   const defaultModelForProvider = (p: string) =>
     p === "openai" ? "gpt-4o-mini" : p === "anthropic" ? "claude-3-5-sonnet-latest" : p === "paddle" ? "paddleocr" : "qwen2.5vl:7b";
 
-  const loadAllPortalScans = async (): Promise<PortalScanRow[]> => {
-    let offset = 0;
-    const all: PortalScanRow[] = [];
-    for (;;) {
-      const page = await api.portalScans(SCAN_PAGE_SIZE, offset);
-      all.push(...page.scans);
-      if (!page.has_more || page.scans.length === 0) break;
-      offset += page.scans.length;
-    }
-    return all;
-  };
-
   useEffect(() => {
     let cancelled = false;
     setBootLoading(true);
-    Promise.all([api.mePortal(), loadAllPortalScans()])
-      .then(([a, s]) => {
+    setScansLoadingMore(false);
+    setScanLoadErr(null);
+    Promise.all([api.mePortal(), api.portalScans(SCAN_PAGE_SIZE, 0)])
+      .then(([a, firstPage]) => {
         if (cancelled) return;
         setAdmin(a);
-        setScans(s);
+        setScans(firstPage.scans);
+        setHasMoreScans(firstPage.has_more);
+        setBootLoading(false);
       })
       .catch(() => { if (!cancelled) nav("/portal/login"); })
       .finally(() => {
@@ -309,6 +333,25 @@ export default function PortalDashboardPage() {
       });
     return () => { cancelled = true; };
   }, [nav]);
+
+  const loadMoreScans = async () => {
+    if (scansLoadingMore || !hasMoreScans) return;
+    setScansLoadingMore(true);
+    setScanLoadErr(null);
+    try {
+      const page = await api.portalScans(SCAN_PAGE_SIZE, scans.length);
+      setHasMoreScans(page.has_more);
+      setScans((prev) => {
+        const seen = new Set(prev.map((scan) => scan.id));
+        const newScans = page.scans.filter((scan) => !seen.has(scan.id));
+        return newScans.length ? [...prev, ...newScans] : prev;
+      });
+    } catch (e: unknown) {
+      setScanLoadErr(e instanceof Error ? e.message : "Could not load more scans.");
+    } finally {
+      setScansLoadingMore(false);
+    }
+  };
 
   useEffect(() => {
     if (!admin) return;
@@ -340,6 +383,28 @@ export default function PortalDashboardPage() {
       })
       .catch(() => {});
   }, [admin]);
+
+  useEffect(() => {
+    if (!admin) return;
+    let cancelled = false;
+    setDashboardLoading(true);
+    setDashboardErr(null);
+    api.portalDashboard(dashboardRange, dashboardGroupBy)
+      .then((payload) => {
+        if (cancelled) return;
+        setDashboard(payload);
+        if (selectedProviderId && !payload.providers.some((provider) => provider.provider_id === selectedProviderId)) {
+          setSelectedProviderId(null);
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setDashboardErr(e instanceof Error ? e.message : "Could not load dashboard.");
+      })
+      .finally(() => {
+        if (!cancelled) setDashboardLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [admin, dashboardRange, dashboardGroupBy]);
 
   const logout = async () => {
     await api.portalLogout();
@@ -408,27 +473,52 @@ export default function PortalDashboardPage() {
     } finally { setDeletingId(null); }
   };
 
-  const filteredRows = useMemo(() => {
-    return scans
-      .filter((s) => {
-        if (filterSurgeon !== "all" && String(s.surgeon_id) !== filterSurgeon) return false;
-        const dateKey = s.service_date ?? s.scanned_at?.slice(0, 10) ?? "";
-        if (filterFrom && dateKey < filterFrom) return false;
-        if (filterTo && dateKey > filterTo) return false;
-        if (filterFacility === "fac" && !s.facility) return false;
-        if (filterFacility === "nonfac" && s.facility) return false;
-        return true;
-      })
-      .map((scan) => ({ scan, fin: financialBreakdown(scan) }));
+  const scanSummary = useMemo(() => {
+    const rows: { scan: PortalScanRow; fin: ReturnType<typeof financialBreakdown> }[] = [];
+    const staffIds = new Set<number>();
+    let totalRvu = 0;
+    let totalPay = 0;
+    let totalWorkRvu = 0;
+    let totalSurgeonValue = 0;
+    let totalFacilityValue = 0;
+
+    for (const s of scans) {
+      if (filterSurgeon !== "all" && String(s.surgeon_id) !== filterSurgeon) continue;
+      const dateKey = s.service_date ?? s.scanned_at?.slice(0, 10) ?? "";
+      if (filterFrom && dateKey < filterFrom) continue;
+      if (filterTo && dateKey > filterTo) continue;
+      if (filterFacility === "fac" && !s.facility) continue;
+      if (filterFacility === "nonfac" && s.facility) continue;
+
+      const fin = listFinancialSummary(s);
+      rows.push({ scan: s, fin });
+      totalRvu += s.total_rvu ?? 0;
+      totalPay += s.total_payment ?? 0;
+      totalWorkRvu += fin.workRvu;
+      totalSurgeonValue += fin.surgeonValue;
+      totalFacilityValue += fin.facilityShare;
+      staffIds.add(s.surgeon_id);
+    }
+
+    return {
+      filteredRows: rows,
+      filtered: rows.map(({ scan }) => scan),
+      totalRvu,
+      totalPay,
+      totalWorkRvu,
+      totalSurgeonValue,
+      totalFacilityValue,
+      uniqueStaff: staffIds.size,
+    };
   }, [scans, filterSurgeon, filterFrom, filterTo, filterFacility]);
 
-  const filtered = filteredRows.map(({ scan }) => scan);
-  const totalRvu = filteredRows.reduce((a, { scan }) => a + (scan.total_rvu ?? 0), 0);
-  const totalPay = filteredRows.reduce((a, { scan }) => a + (scan.total_payment ?? 0), 0);
-  const totalWorkRvu = filteredRows.reduce((a, { fin }) => a + fin.workRvu, 0);
-  const totalSurgeonValue = filteredRows.reduce((a, { fin }) => a + fin.surgeonValue, 0);
-  const totalFacilityValue = filteredRows.reduce((a, { fin }) => a + fin.facilityShare, 0);
-  const uniqueStaff = new Set(filteredRows.map(({ scan }) => scan.surgeon_id)).size;
+  const {
+    filteredRows,
+    filtered,
+    totalRvu,
+    totalPay,
+    totalFacilityValue,
+  } = scanSummary;
 
   const downloadScanReport = () => {
     const head = ["Scanned", "DOS", "Staff", "Role", "Setting", "CPT Count", "Total RVU", "wRVU", "Value$", "Facility$", "Total Payment", "AS Assist Lines"];
@@ -473,6 +563,16 @@ export default function PortalDashboardPage() {
     scans.forEach((s) => { if (s.surgeon_id) seen.set(s.surgeon_id, s.surgeon_name ?? String(s.surgeon_id)); });
     return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
   }, [scans]);
+
+  const selectedProvider = useMemo<PortalDashboardProvider | null>(() => {
+    if (!dashboard || selectedProviderId === null) return null;
+    return dashboard.providers.find((provider) => provider.provider_id === selectedProviderId) ?? null;
+  }, [dashboard, selectedProviderId]);
+
+  const selectedProviderPeriods = useMemo(() => {
+    if (!dashboard || selectedProviderId === null) return [];
+    return dashboard.provider_periods.filter((period) => period.provider_id === selectedProviderId);
+  }, [dashboard, selectedProviderId]);
 
   const startStaffEdit = (s: StaffMember) => {
     setShowAddForm(false); setStaffEditId(s.id);
@@ -592,23 +692,218 @@ export default function PortalDashboardPage() {
 
           <main className="flex-1 overflow-y-auto min-w-0 max-w-screen-xl mx-auto w-full px-4 py-6">
 
-        {/* ── Stat cards (scans only) ── */}
-        {tab === "scans" && (
-        <div className="flex flex-wrap gap-3 mb-6">
-          <StatCard label="Scans shown" value={String(filtered.length)} sub={`of ${scans.length} total`} />
-          <StatCard label="Total RVU" value={totalRvu.toFixed(2)} />
-          <StatCard label="wRVU (doctor)" value={totalWorkRvu.toFixed(2)} />
-          <StatCard label="Value$ (doctor)" value={fmt$(totalSurgeonValue)} />
-          <StatCard label="Facility share" value={fmt$(totalFacilityValue)} />
-          <StatCard label="Total payment" value={fmt$(totalPay)} />
-          <StatCard label="Staff" value={String(uniqueStaff)} sub="with scans shown" />
-        </div>
-        )}
-
         {/* ══════════════ SCANS TAB ══════════════ */}
         {tab === "scans" && (
           <>
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px] mb-4">
+              <div>
+                <h1 className="text-xl font-black text-ink tracking-tight">Practice Dashboard</h1>
+                {dashboard && (
+                  <div className="text-xs text-ink-secondary mt-1">
+                    {fmtCalendarDateMdY(dashboard.range.start)} - {fmtCalendarDateMdY(dashboard.range.end)}
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="label">Range</label>
+                <select className="input text-xs" value={dashboardRange} onChange={(e) => setDashboardRange(e.target.value)}>
+                  <option value="today">Today</option>
+                  <option value="7d">7 days</option>
+                  <option value="30d">30 days</option>
+                  <option value="month">Month</option>
+                  <option value="quarter">Quarter</option>
+                  <option value="ytd">YTD</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">Group</label>
+                <select className="input text-xs" value={dashboardGroupBy} onChange={(e) => setDashboardGroupBy(e.target.value)}>
+                  <option value="day">Day</option>
+                  <option value="week">Week</option>
+                  <option value="month">Month</option>
+                  <option value="quarter">Quarter</option>
+                </select>
+              </div>
+            </div>
+
+            {dashboardErr && (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                <span><span className="font-bold">Dashboard failed.</span> {dashboardErr}</span>
+              </div>
+            )}
+
+            {dashboardLoading && !dashboard && (
+              <div className="card px-4 py-3 mb-4 inline-flex items-center gap-3 text-sm text-ink-secondary">
+                <Spinner />
+                Loading dashboard...
+              </div>
+            )}
+
+            {dashboard && (
+              <div className="space-y-4 mb-6">
+                <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 overflow-hidden rounded-xl border border-brand-border bg-surface">
+                  <CompactStat label="Patients" value={String(dashboard.practice.patients)} />
+                  <CompactStat label="Scans" value={String(dashboard.practice.scans)} />
+                  <CompactStat label="CPT Lines" value={String(dashboard.practice.cpt_lines)} />
+                  <CompactStat label="wRVU" value={dashboard.practice.wrvu.toFixed(2)} />
+                  <CompactStat label="Est. $" value={fmt$(dashboard.practice.est_payment)} />
+                  <CompactStat label="Avg wRVU / Patient" value={dashboard.practice.avg_wrvu_per_patient.toFixed(2)} />
+                  <CompactStat label="Active Scanners" value={String(dashboard.practice.active_scanners)} />
+                  <CompactStat label="Not Scanning" value={String(dashboard.practice.inactive_scanners)} />
+                </div>
+
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(360px,0.8fr)]">
+                  <div className="card overflow-hidden">
+                    <div className="px-4 py-3 border-b border-brand-border">
+                      <h2 className="text-sm font-black text-ink uppercase tracking-wide">Provider Production</h2>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse" style={{ minWidth: 900 }}>
+                        <thead>
+                          <tr>
+                            {["Provider", "Role", "Patients", "Scans", "CPTs", "wRVU", "Est. $", "Avg", "Last Scan"].map((h, i) => (
+                              <th key={h} className={`${TH} ${i >= 2 && i <= 7 ? "text-right" : "text-left"}`}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dashboard.providers.map((provider) => {
+                            const selected = selectedProviderId === provider.provider_id;
+                            return (
+                              <tr
+                                key={provider.provider_id}
+                                onClick={() => {
+                                  setSelectedProviderId(provider.provider_id);
+                                  setFilterSurgeon(String(provider.provider_id));
+                                }}
+                                className={`cursor-pointer transition-colors ${selected ? "bg-brand-muted/70" : "hover:bg-surface-soft"}`}
+                              >
+                                <td className={`${TD} font-bold`}>{provider.provider_name}</td>
+                                <td className={TD}>{provider.role ? <span className="badge-blue">{staffRoleLabel(provider.role)}</span> : "—"}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.patients}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.scans}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.cpt_lines}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{provider.wrvu.toFixed(2)}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(provider.est_payment)}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.avg_wrvu_per_patient.toFixed(2)}</td>
+                                <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{provider.last_scan ? fmtDateTimeEt(provider.last_scan) : "—"}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="card overflow-hidden">
+                    <div className="px-4 py-3 border-b border-brand-border">
+                      <h2 className="text-sm font-black text-ink uppercase tracking-wide">Period Trend</h2>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse" style={{ minWidth: 520 }}>
+                        <thead>
+                          <tr>
+                            {["Period", "Patients", "Scans", "wRVU", "Est. $"].map((h, i) => (
+                              <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dashboard.periods.map((period) => (
+                            <tr key={period.period_key} className="hover:bg-surface-soft">
+                              <td className={`${TD} font-semibold`}>{period.period_label}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.patients}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.scans}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{period.wrvu.toFixed(2)}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(period.est_payment)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <div className="card overflow-hidden">
+                    <div className="px-4 py-3 border-b border-brand-border">
+                      <h2 className="text-sm font-black text-ink uppercase tracking-wide">CPT Mix</h2>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse" style={{ minWidth: 620 }}>
+                        <thead>
+                          <tr>
+                            {["CPT", "Count", "Patients", "Providers", "wRVU", "Est. $"].map((h, i) => (
+                              <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dashboard.cpt_mix.slice(0, 12).map((cpt) => (
+                            <tr key={cpt.cpt} className="hover:bg-surface-soft">
+                              <td className={`${TD} font-mono font-bold`}>{cpt.cpt}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.count}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.patients}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.providers}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{cpt.wrvu.toFixed(2)}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(cpt.est_payment)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="card overflow-hidden">
+                    <div className="px-4 py-3 border-b border-brand-border">
+                      <h2 className="text-sm font-black text-ink uppercase tracking-wide">
+                        {selectedProvider ? selectedProvider.provider_name : "Provider Drilldown"}
+                      </h2>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse" style={{ minWidth: 620 }}>
+                        <thead>
+                          <tr>
+                            {["Period", "Patients", "Scans", "CPTs", "wRVU", "Est. $"].map((h, i) => (
+                              <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {!selectedProvider && (
+                            <tr><td colSpan={6} className="px-4 py-10 text-center text-ink-secondary text-sm">Select a provider row.</td></tr>
+                          )}
+                          {selectedProvider && selectedProviderPeriods.length === 0 && (
+                            <tr><td colSpan={6} className="px-4 py-10 text-center text-ink-secondary text-sm">No scans in range.</td></tr>
+                          )}
+                          {selectedProviderPeriods.map((period) => (
+                            <tr key={`${period.provider_id}-${period.period_key}`} className="hover:bg-surface-soft">
+                              <td className={`${TD} font-semibold`}>{period.period_label}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.patients}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.scans}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.cpt_lines}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{period.wrvu.toFixed(2)}</td>
+                              <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(period.est_payment)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {scanLoadErr && (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                <span><span className="font-bold">Some scans did not load.</span> {scanLoadErr}</span>
+              </div>
+            )}
+
             {/* Filters */}
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h2 className="text-sm font-black text-ink uppercase tracking-wide">Scan Detail</h2>
+            </div>
             <div className="card px-4 py-3.5 mb-4 flex flex-wrap gap-4 items-end">
               {[
                 { label: "Staff", content: (
@@ -789,6 +1084,21 @@ export default function PortalDashboardPage() {
                   )}
                 </table>
               </div>
+              {hasMoreScans && (
+                <div className="border-t border-brand-border bg-surface px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-xs text-ink-secondary">
+                    Showing {scans.length} newest scans. More are available.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void loadMoreScans()}
+                    disabled={scansLoadingMore}
+                    className="btn-secondary text-xs px-3 py-2"
+                  >
+                    {scansLoadingMore ? <><Spinner className="w-3 h-3" /> Loading...</> : "Load more"}
+                  </button>
+                </div>
+              )}
             </div>
           </>
         )}

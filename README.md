@@ -2,7 +2,22 @@
 
 Uses the **same PostgreSQL database** as other practice apps for shared tables: `surgeons`, `surgeon_devices`, `magic_links`, `admin_users`, `rvu_scans`, etc.
 
-**Open this folder in Cursor** (`/home/dnaile748/rvu`) to continue development.
+**Open this folder for backend, portal, and production deploy work.**
+
+On the dev Mac, the source-of-truth path is:
+
+```text
+/Users/donnaile/dev/rvu/prod-rvu
+```
+
+On the production VM, the active runtime path is:
+
+```text
+rvu-5.61:/opt/rvu
+```
+
+There is no separate active portal repo. The only portal/staff web app is `frontend/`.
+See [`docs/REPO_SOURCE_OF_TRUTH.md`](docs/REPO_SOURCE_OF_TRUTH.md).
 
 ## Layout
 

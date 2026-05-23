@@ -19,6 +19,7 @@ from app.database import Base
 class RvuScan(Base):
     __tablename__ = "rvu_scans"
     __table_args__ = (
+        Index("ix_rvu_scans_scanned_at", "scanned_at"),
         Index("ix_rvu_scans_surgeon_service_date", "surgeon_id", "service_date"),
         Index("ix_rvu_scans_surgeon_scan_status", "surgeon_id", "scan_status"),
         Index("ix_rvu_scans_surgeon_request_id", "surgeon_id", "client_request_id"),

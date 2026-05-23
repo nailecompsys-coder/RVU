@@ -31,30 +31,25 @@ scripts/sync_shadow_from_prod.sh 192.168.5.61
 That sync preserves device/session continuity, imports current active magic links,
 and prunes stale shadow-only rows.
 
-## 2) Build frontend (if frontend changed)
+## 2) Deploy from Mac
 
 ```bash
-cd /opt/rvu/frontend
-npm ci
-npm run build
+cd /Users/donnaile/dev/rvu/prod-rvu
+deploy/release_from_mac.sh rvu-prod
 ```
 
-## 3) Update backend dependencies (if requirements changed)
+This builds `frontend/dist`, bundles `backend/`, `frontend/dist`, `Dockerfile`, `docker-compose.yml`, and `deploy/`, then updates `/opt/rvu` on the VM.
 
-```bash
-cd /opt/rvu/backend
-pip install -r requirements.txt
-```
-
-## 4) Restart production container
+## 3) Manual emergency rebuild on VM
 
 ```bash
 cd /opt/rvu
+docker compose build rvu_api
 docker compose up -d rvu_api
 docker logs --tail 80 rvu_api
 ```
 
-## 5) Verify runtime and health
+## 4) Verify runtime and health
 
 ```bash
 cd /opt/rvu
@@ -62,7 +57,7 @@ scripts/verify_runtime.sh
 curl -sf http://127.0.0.1:3010/api/health
 ```
 
-## 6) Verify public ingress
+## 5) Verify public ingress
 
 ```bash
 curl -I https://rvu.midfloridasurgical.com

@@ -2159,7 +2159,7 @@ def _scan_history_dict(s: RvuScan, surgeon: "RvuStaff | None" = None) -> dict:
     }
 
 
-def _scan_list_dict(s: RvuScan, surgeon: "RvuStaff | None" = None) -> dict:
+def _scan_list_dict(s: RvuScan, surgeon: "RvuStaff | None" = None, has_image: bool | None = None) -> dict:
     return {
         "id": s.id,
         "scanned_at": _iso_utc(s.scanned_at),
@@ -2176,7 +2176,7 @@ def _scan_list_dict(s: RvuScan, surgeon: "RvuStaff | None" = None) -> dict:
         "locality_name": s.locality_name,
         "facility": s.facility,
         "ai_model": s.ai_model,
-        "has_image": _stored_binary_usable(s.image_data),
+        "has_image": _stored_binary_usable(s.image_data) if has_image is None else has_image,
         "scan_status": s.scan_status or "verified",
         "status_label": _scan_status_label(s),
         "main_cpt": s.main_cpt,
@@ -2189,6 +2189,158 @@ def _scan_list_dict(s: RvuScan, surgeon: "RvuStaff | None" = None) -> dict:
         "review_reason": _get_scan_review_reason(s),
         **_scan_financial_summary(s),
     }
+
+
+def _portal_scan_list_row_dict(row) -> dict:
+    total_rvu = round(float(row.total_rvu or 0.0), 2)
+    total_payment = round(float(row.total_payment or 0.0), 2)
+    cf = float(row.cf or 32.3465)
+    surgeon_value = round(total_rvu * cf, 2)
+    return {
+        "id": row.id,
+        "scanned_at": _iso_utc(row.scanned_at),
+        "scanned_at_et": _iso_et(row.scanned_at),
+        "scanned_at_label": _label_et(row.scanned_at),
+        "service_date": row.service_date.isoformat() if row.service_date else None,
+        "patient_name": row.patient_name,
+        "mrn": row.mrn,
+        "total_rvu": total_rvu,
+        "total_payment": total_payment,
+        "cf": row.cf,
+        "locality_num": row.locality_num,
+        "locality_name": row.locality_name,
+        "facility": row.facility,
+        "ai_model": row.ai_model,
+        "has_image": bool(row.image_bytes),
+        "scan_status": row.scan_status or "verified",
+        "status_label": _scan_status_label(row),
+        "main_cpt": row.main_cpt,
+        "main_cpt_status": row.main_cpt_status,
+        "surgeon_id": row.surgeon_id,
+        "surgeon_name": row.surgeon_name,
+        "staff_type": row.staff_type,
+        "elapsed_secs": row.elapsed_secs,
+        "ocr_elapsed_label": _elapsed_label(row.elapsed_secs),
+        "review_reason": row.review_reason or _review_reason_from_scan_fields(
+            main_cpt_status=row.main_cpt_status,
+            main_cpt=row.main_cpt,
+            patient_name=row.patient_name,
+            mrn=row.mrn,
+            service_date=row.service_date,
+        ),
+        "cpt_count": 1 if row.main_cpt else 0,
+        "work_rvu": total_rvu,
+        "surgeon_value": surgeon_value,
+        "facility_share": round(total_payment - surgeon_value, 2),
+        "assist_count": 0,
+    }
+
+
+def _portal_dashboard_period_bounds(range_key: str | None, start: str | None, end: str | None) -> tuple[date, date, str]:
+    today = datetime.now(APP_TIME_ZONE).date()
+    if start:
+        start_date = payment_svc.parse_service_date(start)
+        if not start_date:
+            raise HTTPException(status_code=400, detail="Invalid start date")
+    elif range_key == "today":
+        start_date = today
+    elif range_key == "7d":
+        start_date = today - timedelta(days=6)
+    elif range_key == "30d":
+        start_date = today - timedelta(days=29)
+    elif range_key == "quarter":
+        quarter_month = ((today.month - 1) // 3) * 3 + 1
+        start_date = date(today.year, quarter_month, 1)
+    elif range_key == "ytd":
+        start_date = date(today.year, 1, 1)
+    else:
+        start_date = date(today.year, today.month, 1)
+
+    if end:
+        end_date = payment_svc.parse_service_date(end)
+        if not end_date:
+            raise HTTPException(status_code=400, detail="Invalid end date")
+    else:
+        end_date = today
+
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="End date must be after start date")
+    return start_date, end_date, range_key or "month"
+
+
+def _portal_period_key(day: date, group_by: str) -> tuple[str, str]:
+    if group_by == "week":
+        iso_year, iso_week, _ = day.isocalendar()
+        return f"{iso_year}-W{iso_week:02d}", f"Week {iso_week}, {iso_year}"
+    if group_by == "month":
+        return day.strftime("%Y-%m"), day.strftime("%b %Y")
+    if group_by == "quarter":
+        quarter = ((day.month - 1) // 3) + 1
+        return f"{day.year}-Q{quarter}", f"Q{quarter} {day.year}"
+    return day.isoformat(), day.strftime("%b %-d")
+
+
+def _empty_metric_bucket() -> dict:
+    return {
+        "patients": set(),
+        "unknown_patients": 0,
+        "scans": 0,
+        "cpt_lines": 0,
+        "wrvu": 0.0,
+        "est_payment": 0.0,
+        "pending_review": 0,
+        "missing_mrn": 0,
+        "missing_service_date": 0,
+        "active_scanners": set(),
+    }
+
+
+def _metric_payload(bucket: dict) -> dict:
+    patient_count = len(bucket["patients"]) + int(bucket["unknown_patients"])
+    wrvu = round(float(bucket["wrvu"]), 2)
+    return {
+        "patients": patient_count,
+        "scans": int(bucket["scans"]),
+        "cpt_lines": int(bucket["cpt_lines"]),
+        "wrvu": wrvu,
+        "est_payment": round(float(bucket["est_payment"]), 2),
+        "avg_wrvu_per_patient": round(wrvu / patient_count, 2) if patient_count else 0.0,
+        "active_scanners": len(bucket["active_scanners"]),
+        "pending_review": int(bucket["pending_review"]),
+        "missing_mrn": int(bucket["missing_mrn"]),
+        "missing_service_date": int(bucket["missing_service_date"]),
+    }
+
+
+def _scan_lines_for_dashboard(row) -> list[dict]:
+    items = _parse_line_items(row.line_items)
+    if items:
+        return items
+    if row.main_cpt:
+        return [{
+            "cpt": row.main_cpt,
+            "work_rvu": row.total_rvu or 0.0,
+            "payment": row.total_payment or 0.0,
+        }]
+    return []
+
+
+def _add_scan_to_bucket(bucket: dict, row, lines: list[dict], scan_day: date) -> None:
+    bucket["scans"] += 1
+    mrn = str(row.mrn or "").strip()
+    if mrn:
+        bucket["patients"].add(mrn)
+    else:
+        bucket["unknown_patients"] += 1
+        bucket["missing_mrn"] += 1
+    if not row.service_date:
+        bucket["missing_service_date"] += 1
+    if (row.scan_status or "verified") == "pending_review":
+        bucket["pending_review"] += 1
+    bucket["active_scanners"].add(row.surgeon_id)
+    bucket["cpt_lines"] += len(lines)
+    bucket["wrvu"] += sum(float(line.get("work_rvu") or line.get("total_rvu") or 0.0) for line in lines)
+    bucket["est_payment"] += float(row.total_payment or 0.0)
 
 
 @router.get("/history")
@@ -3136,6 +3288,178 @@ def portal_patch_modifier_rule_endpoint(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@portal_router.get("/dashboard")
+def portal_dashboard(
+    db: Session = Depends(get_db),
+    _admin=Depends(get_current_admin_api),
+    range: str = "month",
+    group_by: str = "week",
+    start: str | None = None,
+    end: str | None = None,
+):
+    if group_by not in {"day", "week", "month", "quarter"}:
+        raise HTTPException(status_code=400, detail="Invalid group_by")
+    start_date, end_date, range_key = _portal_dashboard_period_bounds(range, start, end)
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+
+    staff_rows = (
+        db.query(RvuStaff)
+        .filter(RvuStaff.staff_type.in_(["physician", "pa", "physician_assistant"]))
+        .order_by(RvuStaff.last_name, RvuStaff.first_name)
+        .all()
+    )
+    provider_map = {
+        staff.id: {
+            "provider_id": staff.id,
+            "provider_name": staff.full_name,
+            "role": staff.staff_type,
+            "is_active": bool(staff.is_active),
+            "last_scan": None,
+            "top_cpt": None,
+            "bucket": _empty_metric_bucket(),
+            "cpts": Counter(),
+        }
+        for staff in staff_rows
+    }
+
+    scan_day_expr = func.date(RvuScan.scanned_at)
+    scan_rows = (
+        db.query(
+            RvuScan.id,
+            RvuScan.surgeon_id,
+            RvuScan.scanned_at,
+            RvuScan.service_date,
+            RvuScan.mrn,
+            RvuScan.total_rvu,
+            RvuScan.total_payment,
+            RvuScan.scan_status,
+            RvuScan.main_cpt,
+            RvuScan.line_items,
+        )
+        .filter(
+            or_(
+                RvuScan.service_date.between(start_date, end_date),
+                (RvuScan.service_date.is_(None) & scan_day_expr.between(start_iso, end_iso)),
+            )
+        )
+        .filter(RvuScan.scan_status != "pending_processing")
+        .order_by(desc(RvuScan.scanned_at))
+        .all()
+    )
+
+    practice = _empty_metric_bucket()
+    periods: dict[str, dict] = {}
+    provider_periods: dict[tuple[int, str], dict] = {}
+    cpt_mix: dict[str, dict] = {}
+
+    for row in scan_rows:
+        scan_day = row.service_date or (row.scanned_at.date() if row.scanned_at else start_date)
+        period_key, period_label = _portal_period_key(scan_day, group_by)
+        lines = _scan_lines_for_dashboard(row)
+        provider = provider_map.get(row.surgeon_id)
+        if provider is None:
+            provider = {
+                "provider_id": row.surgeon_id,
+                "provider_name": f"Staff #{row.surgeon_id}",
+                "role": "unknown",
+                "is_active": False,
+                "last_scan": None,
+                "top_cpt": None,
+                "bucket": _empty_metric_bucket(),
+                "cpts": Counter(),
+            }
+            provider_map[row.surgeon_id] = provider
+
+        if not provider["last_scan"] or (row.scanned_at and row.scanned_at.isoformat() > provider["last_scan"]):
+            provider["last_scan"] = row.scanned_at.isoformat() if row.scanned_at else None
+
+        period = periods.setdefault(period_key, {"period_key": period_key, "period_label": period_label, "bucket": _empty_metric_bucket()})
+        provider_period = provider_periods.setdefault(
+            (row.surgeon_id, period_key),
+            {
+                "provider_id": row.surgeon_id,
+                "provider_name": provider["provider_name"],
+                "period_key": period_key,
+                "period_label": period_label,
+                "bucket": _empty_metric_bucket(),
+            },
+        )
+
+        for bucket in (practice, provider["bucket"], period["bucket"], provider_period["bucket"]):
+            _add_scan_to_bucket(bucket, row, lines, scan_day)
+
+        mrn = str(row.mrn or "").strip()
+        patient_key = mrn or f"scan:{row.id}"
+        for line in lines:
+            cpt = str(line.get("cpt") or line.get("code") or row.main_cpt or "Unknown").strip() or "Unknown"
+            wrvu = float(line.get("work_rvu") or line.get("total_rvu") or 0.0)
+            payment = float(line.get("payment") or 0.0)
+            provider["cpts"][cpt] += 1
+            entry = cpt_mix.setdefault(cpt, {"cpt": cpt, "count": 0, "patients": set(), "wrvu": 0.0, "est_payment": 0.0, "providers": set()})
+            entry["count"] += 1
+            entry["patients"].add(patient_key)
+            entry["wrvu"] += wrvu
+            entry["est_payment"] += payment
+            entry["providers"].add(row.surgeon_id)
+
+    provider_rows = []
+    for provider in provider_map.values():
+        metrics = _metric_payload(provider["bucket"])
+        top_cpt = provider["cpts"].most_common(1)
+        provider_rows.append({
+            "provider_id": provider["provider_id"],
+            "provider_name": provider["provider_name"],
+            "role": provider["role"],
+            "is_active": provider["is_active"],
+            "last_scan": provider["last_scan"],
+            "top_cpt": top_cpt[0][0] if top_cpt else None,
+            **metrics,
+        })
+    provider_rows.sort(key=lambda item: (-float(item["wrvu"]), item["provider_name"]))
+
+    period_rows = []
+    for period in periods.values():
+        period_rows.append({"period_key": period["period_key"], "period_label": period["period_label"], **_metric_payload(period["bucket"])})
+    period_rows.sort(key=lambda item: item["period_key"], reverse=True)
+
+    provider_period_rows = []
+    for item in provider_periods.values():
+        provider_period_rows.append({
+            "provider_id": item["provider_id"],
+            "provider_name": item["provider_name"],
+            "period_key": item["period_key"],
+            "period_label": item["period_label"],
+            **_metric_payload(item["bucket"]),
+        })
+    provider_period_rows.sort(key=lambda item: (item["provider_name"], item["period_key"]))
+
+    cpt_rows = [
+        {
+            "cpt": entry["cpt"],
+            "count": int(entry["count"]),
+            "patients": len(entry["patients"]),
+            "wrvu": round(float(entry["wrvu"]), 2),
+            "est_payment": round(float(entry["est_payment"]), 2),
+            "providers": len(entry["providers"]),
+        }
+        for entry in cpt_mix.values()
+    ]
+    cpt_rows.sort(key=lambda item: (-float(item["wrvu"]), item["cpt"]))
+
+    practice_metrics = _metric_payload(practice)
+    practice_metrics["inactive_scanners"] = sum(1 for row in provider_rows if row["is_active"] and row["scans"] == 0)
+
+    return {
+        "range": {"key": range_key, "start": start_iso, "end": end_iso, "group_by": group_by},
+        "practice": practice_metrics,
+        "providers": provider_rows,
+        "periods": period_rows,
+        "provider_periods": provider_period_rows,
+        "cpt_mix": cpt_rows[:50],
+    }
+
+
 @portal_router.get("/scans")
 def portal_all_scans(
     db: Session = Depends(get_db),
@@ -3145,22 +3469,45 @@ def portal_all_scans(
 ):
     limit = min(max(limit, 1), 250)
     offset = max(offset, 0)
-    total_count = db.query(func.count(RvuScan.id)).scalar() or 0
+    image_bytes = func.length(RvuScan.image_data).label("image_bytes")
     rows = (
-        db.query(RvuScan, RvuStaff)
+        db.query(
+            RvuScan.id,
+            RvuScan.scanned_at,
+            RvuScan.service_date,
+            RvuScan.patient_name,
+            RvuScan.mrn,
+            RvuScan.total_rvu,
+            RvuScan.total_payment,
+            RvuScan.cf,
+            RvuScan.locality_num,
+            RvuScan.locality_name,
+            RvuScan.facility,
+            RvuScan.ai_model,
+            RvuScan.scan_status,
+            RvuScan.main_cpt,
+            RvuScan.main_cpt_status,
+            RvuScan.surgeon_id,
+            RvuScan.elapsed_secs,
+            RvuScan.review_reason,
+            RvuStaff.full_name.label("surgeon_name"),
+            RvuStaff.staff_type.label("staff_type"),
+            image_bytes,
+        )
         .outerjoin(RvuStaff, RvuStaff.id == RvuScan.surgeon_id)
         .order_by(desc(RvuScan.scanned_at))
         .offset(offset)
-        .limit(limit)
+        .limit(limit + 1)
         .all()
     )
-    scans = [_scan_list_dict(scan, surgeon) for scan, surgeon in rows]
+    has_more = len(rows) > limit
+    scans = [_portal_scan_list_row_dict(row) for row in rows[:limit]]
     return {
         "scans": scans,
         "limit": limit,
         "offset": offset,
-        "total_count": total_count,
-        "has_more": (offset + len(scans)) < total_count,
+        "total_count": offset + len(scans) + (1 if has_more else 0),
+        "has_more": has_more,
     }
 
 
