@@ -3470,6 +3470,13 @@ def portal_all_scans(
     limit = min(max(limit, 1), 250)
     offset = max(offset, 0)
     image_bytes = func.length(RvuScan.image_data).label("image_bytes")
+    staff_name = func.trim(
+        func.concat(
+            func.coalesce(RvuStaff.first_name, ""),
+            " ",
+            func.coalesce(RvuStaff.last_name, ""),
+        )
+    ).label("surgeon_name")
     rows = (
         db.query(
             RvuScan.id,
@@ -3490,7 +3497,7 @@ def portal_all_scans(
             RvuScan.surgeon_id,
             RvuScan.elapsed_secs,
             RvuScan.review_reason,
-            RvuStaff.full_name.label("surgeon_name"),
+            staff_name,
             RvuStaff.staff_type.label("staff_type"),
             image_bytes,
         )
