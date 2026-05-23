@@ -26,8 +26,6 @@ Project structure policy lives at [`docs/PROJECT_STRUCTURE_STANDARD.md`](docs/PR
 |------|---------|
 | `backend/` | FastAPI API — OOP services in `app/services/`, JSON routes in `app/api/` |
 | `frontend/` | React 18 + Vite + TypeScript — staff capture + portal |
-| `docs/from-cal/` | Archived reference docs (legacy scheduling product) |
-| `docs/from-cal-cursor/` | Archived editor rules from the same legacy project |
 
 > **Note:** If you see a legacy `app/` or `.venv` at the **repo root** from older work, prefer **`backend/`** and **`frontend/`** for this project.
 
@@ -64,7 +62,7 @@ Vite proxies `/api` → `http://127.0.0.1:3010`.
 4. **Local Docker parity (preferred)**:
 
 ```bash
-cd /home/dnaile748/rvu
+cd /Users/donnaile/dev/rvu/prod-rvu
 docker compose up -d --build
 curl -sf http://127.0.0.1:3010/api/health
 ```

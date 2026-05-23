@@ -10,7 +10,7 @@ This is the canonical production deploy sequence for RVU.
 - Repo is updated to the desired commit.
 - `.env` is present and valid.
 
-Do not use `/home/dnaile748/rvu` for normal deploys. It may exist as old deploy material, but `/opt/rvu/docker-compose.yml` is the active production project.
+Do not use `/home/dnaile748/rvu`; that retired VM path should not exist. `/opt/rvu/docker-compose.yml` is the active production project.
 
 ## 1) Preflight checks
 

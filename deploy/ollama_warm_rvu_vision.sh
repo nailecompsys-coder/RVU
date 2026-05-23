@@ -4,11 +4,11 @@
 # VRAM preload decays unless you periodically infer — this script optionally keeps weights hot briefly.
 #
 # Cron examples:
-#   @reboot sleep 45 && /home/dnaile748/rvu/deploy/ollama_warm_rvu_vision.sh >>/tmp/rvu_ollama_warm.log 2>&1
-#   */30 * * * * /home/dnaile748/rvu/deploy/ollama_warm_rvu_vision.sh >/dev/null 2>&1
+#   @reboot sleep 45 && /opt/rvu/deploy/ollama_warm_rvu_vision.sh >>/tmp/rvu_ollama_warm.log 2>&1
+#   */30 * * * * /opt/rvu/deploy/ollama_warm_rvu_vision.sh >/dev/null 2>&1
 set -eu
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
-RVU_ENV="${RVU_ENV_FILE:-/home/dnaile748/rvu/.env}"
+RVU_ENV="${RVU_ENV_FILE:-/opt/rvu/.env}"
 MODEL="$(grep '^VISION_MODEL=' "${RVU_ENV}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')"
 MODEL="${MODEL:-qwen2.5vl:7b}"
 

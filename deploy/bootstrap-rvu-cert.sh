@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reference: docs/DEPLOY_RUNBOOK.md (canonical deploy flow)
-# Run once as root/sudo:  sudo bash /home/dnaile748/rvu/deploy/bootstrap-rvu-cert.sh
+# Run once as root/sudo:  sudo bash /opt/rvu/deploy/bootstrap-rvu-cert.sh
 #
 # What this does:
 #   1. Grants dnaile748 passwordless sudo for the specific commands needed
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 USER=dnaile748
-EMAIL="$(grep -m1 'ADMIN_EMAIL\|CERTBOT_EMAIL\|BASE_URL' /home/$USER/rvu/.env 2>/dev/null | head -n1 | cut -d@ -f2 | sed 's/[^a-zA-Z0-9._@-]//g' || true)"
+EMAIL="$(grep -m1 'ADMIN_EMAIL\|CERTBOT_EMAIL\|BASE_URL' /opt/rvu/.env 2>/dev/null | head -n1 | cut -d@ -f2 | sed 's/[^a-zA-Z0-9._@-]//g' || true)"
 if [[ -z "$EMAIL" ]]; then
   EMAIL="admin@midfloridasurgical.com"
 fi
@@ -37,8 +37,8 @@ $USER ALL=(ALL) NOPASSWD: /bin/rm -f $SITES_ENAB/rvu
 $USER ALL=(ALL) NOPASSWD: /usr/bin/docker
 $USER ALL=(ALL) NOPASSWD: /usr/local/bin/docker
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee $SITES_AVAIL/*
-$USER ALL=(ALL) NOPASSWD: /bin/cp /home/$USER/rvu/deploy/nginx-rvu.conf $SITES_AVAIL/rvu
-$USER ALL=(ALL) NOPASSWD: /usr/bin/cp /home/$USER/rvu/deploy/nginx-rvu.conf $SITES_AVAIL/rvu
+$USER ALL=(ALL) NOPASSWD: /bin/cp /opt/rvu/deploy/nginx-rvu.conf $SITES_AVAIL/rvu
+$USER ALL=(ALL) NOPASSWD: /usr/bin/cp /opt/rvu/deploy/nginx-rvu.conf $SITES_AVAIL/rvu
 EOF
 chmod 440 "$SUDOERS_FILE"
 visudo -c -f "$SUDOERS_FILE" && echo "   sudoers file OK" || { echo "   sudoers syntax error — removing"; rm -f "$SUDOERS_FILE"; exit 1; }
@@ -75,7 +75,7 @@ docker run --rm \
   --keep-until-expiring
 
 echo "==> [5/6] Enabling rvu vhost and reloading nginx ..."
-cp /home/$USER/rvu/deploy/nginx-rvu.conf "$RVU_CONF"
+cp /opt/rvu/deploy/nginx-rvu.conf "$RVU_CONF"
 ln -sf "$RVU_CONF" "$SITES_ENAB/rvu"
 nginx -t
 systemctl reload nginx

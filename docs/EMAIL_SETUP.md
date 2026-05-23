@@ -82,7 +82,7 @@ recipients see a clean sender name. A real personal account works too.
 
 
 
-Edit **`/home/dnaile748/rvu/.env`** (or your deployment path).
+Edit **`/opt/rvu/.env`** on the production VM, or the local `.env` in `/Users/donnaile/dev/rvu/prod-rvu`.
 
 
 
@@ -299,5 +299,4 @@ send_magic_link_email(
 )
 
 ```
-
 

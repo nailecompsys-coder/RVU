@@ -6,12 +6,12 @@ After=network.target postgresql.service
 Type=simple
 User=dnaile748
 Group=dnaile748
-WorkingDirectory=/home/dnaile748/rvu/backend
+WorkingDirectory=/opt/rvu/backend
 
-EnvironmentFile=/home/dnaile748/rvu/.env
-Environment=PYTHONPATH=/home/dnaile748/rvu/backend
+EnvironmentFile=/opt/rvu/.env
+Environment=PYTHONPATH=/opt/rvu/backend
 
-ExecStart=/home/dnaile748/rvu/.venv/bin/uvicorn app.main:app \
+ExecStart=/opt/rvu/.venv/bin/uvicorn app.main:app \
     --host 127.0.0.1 \
     --port 3010 \
     --workers 2

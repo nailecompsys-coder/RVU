@@ -39,7 +39,7 @@ Do not use these for current work:
 | --- | --- |
 | `/Users/donnaile/dev/rvu/api` | Old split API repo. It is not the production backend source. |
 | `/Users/donnaile/dev/rvu/portal` | Removed duplicate portal repo. The only portal is `prod-rvu/frontend`. |
-| `/home/dnaile748/rvu` on the VM | Old deploy material. Active production runs from `/opt/rvu`. |
+| `/home/dnaile748/rvu` on the VM | Retired deploy material. Delete if found; active production runs from `/opt/rvu`. |
 
 ## Required Preflight
 

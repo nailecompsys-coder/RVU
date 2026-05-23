@@ -30,7 +30,7 @@ require_file "${VERIFY_PY}"
 SOURCE_DB_URL="$(
   python3 - <<'PY'
 from pathlib import Path
-for line in Path("/home/dnaile748/rvu/.env").read_text().splitlines():
+for line in Path(".env").read_text().splitlines():
     if line.startswith("DATABASE_URL="):
         print(line.split("=", 1)[1].strip())
         break
@@ -77,4 +77,3 @@ python3 "${VERIFY_PY}" \
   --staff-scope rvu_only \
   --include-devices \
   --include-magic-links
-
