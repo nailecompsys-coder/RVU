@@ -329,13 +329,14 @@ export default function PortalDashboardPage() {
   const [devErr, setDevErr] = useState<string | null>(null);
   const defaultModelForProvider = (p: string) =>
     p === "openai" ? "gpt-4o-mini" : p === "anthropic" ? "claude-3-5-sonnet-latest" : p === "paddle" ? "paddleocr" : "qwen2.5vl:7b";
+  const todayKey = useMemo(() => etDateKey(new Date().toISOString()), []);
 
   useEffect(() => {
     let cancelled = false;
     setBootLoading(true);
     setScansLoadingMore(false);
     setScanLoadErr(null);
-    Promise.all([api.mePortal(), api.portalScans(SCAN_PAGE_SIZE, 0)])
+    Promise.all([api.mePortal(), api.portalScans(SCAN_PAGE_SIZE, 0, { scannedOn: todayKey })])
       .then(([a, firstPage]) => {
         if (cancelled) return;
         setAdmin(a);
@@ -348,14 +349,14 @@ export default function PortalDashboardPage() {
         if (!cancelled) setBootLoading(false);
       });
     return () => { cancelled = true; };
-  }, [nav]);
+  }, [nav, todayKey]);
 
   const loadMoreScans = async () => {
     if (scansLoadingMore || !hasMoreScans) return;
     setScansLoadingMore(true);
     setScanLoadErr(null);
     try {
-      const page = await api.portalScans(SCAN_PAGE_SIZE, scans.length);
+      const page = await api.portalScans(SCAN_PAGE_SIZE, scans.length, { scannedOn: todayKey });
       setHasMoreScans(page.has_more);
       setScans((prev) => {
         const seen = new Set(prev.map((scan) => scan.id));
@@ -490,7 +491,6 @@ export default function PortalDashboardPage() {
   };
 
   const todayScanSummary = useMemo(() => {
-    const todayKey = etDateKey(new Date().toISOString());
     const rows: { scan: PortalScanRow; fin: ReturnType<typeof financialBreakdown> }[] = [];
     let totalRvu = 0;
     let totalPay = 0;
@@ -517,7 +517,7 @@ export default function PortalDashboardPage() {
       totalFacilityValue,
       dateKey: todayKey,
     };
-  }, [scans]);
+  }, [scans, todayKey]);
 
   const {
     rows: todayScanRows,
@@ -525,7 +525,7 @@ export default function PortalDashboardPage() {
     totalRvu,
     totalPay,
     totalFacilityValue,
-    dateKey: todayKey,
+    dateKey: todayScanDateKey,
   } = todayScanSummary;
 
   const groupedProviders = useMemo(() => {
@@ -852,7 +852,7 @@ export default function PortalDashboardPage() {
             <div className="order-1 mb-6">
             <div className="flex items-center justify-between gap-3 mb-3">
               <h2 className="text-sm font-black text-ink uppercase tracking-wide">Today's Scans</h2>
-              <span className="text-xs font-semibold text-ink-secondary">{todayKey}</span>
+              <span className="text-xs font-semibold text-ink-secondary">{todayScanDateKey}</span>
             </div>
 
             <div className="card overflow-hidden">

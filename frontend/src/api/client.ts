@@ -63,8 +63,11 @@ export const api = {
       body: JSON.stringify(body),
     }),
   history: () => json<{ scans: ScanRow[] }>("/api/v1/rvu/history"),
-  portalScans: (limit = 100, offset = 0) =>
-    json<PortalScansResponse>(`/api/v1/portal/rvu/scans?limit=${limit}&offset=${offset}`),
+  portalScans: (limit = 100, offset = 0, options?: { scannedOn?: string }) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (options?.scannedOn) params.set("scanned_on", options.scannedOn);
+    return json<PortalScansResponse>(`/api/v1/portal/rvu/scans?${params.toString()}`);
+  },
   portalDashboard: (range = "month", groupBy = "week") =>
     json<PortalDashboardResponse>(`/api/v1/portal/rvu/dashboard?range=${encodeURIComponent(range)}&group_by=${encodeURIComponent(groupBy)}`),
   portalScanDetail: (id: number) =>

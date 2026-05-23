@@ -3466,6 +3466,7 @@ def portal_all_scans(
     _admin=Depends(get_current_admin_api),
     limit: int = 100,
     offset: int = 0,
+    scanned_on: str | None = None,
 ):
     limit = min(max(limit, 1), 250)
     offset = max(offset, 0)
@@ -3477,7 +3478,7 @@ def portal_all_scans(
             func.coalesce(RvuStaff.last_name, ""),
         )
     ).label("surgeon_name")
-    rows = (
+    query = (
         db.query(
             RvuScan.id,
             RvuScan.scanned_at,
@@ -3502,11 +3503,18 @@ def portal_all_scans(
             image_bytes,
         )
         .outerjoin(RvuStaff, RvuStaff.id == RvuScan.surgeon_id)
-        .order_by(desc(RvuScan.scanned_at))
-        .offset(offset)
-        .limit(limit + 1)
-        .all()
     )
+    if scanned_on:
+        try:
+            scan_day = date.fromisoformat(scanned_on)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid scanned_on date") from exc
+        start_et = datetime.combine(scan_day, datetime.min.time(), tzinfo=APP_TIME_ZONE)
+        end_et = start_et + timedelta(days=1)
+        start_utc = start_et.astimezone(timezone.utc).replace(tzinfo=None)
+        end_utc = end_et.astimezone(timezone.utc).replace(tzinfo=None)
+        query = query.filter(RvuScan.scanned_at >= start_utc, RvuScan.scanned_at < end_utc)
+    rows = query.order_by(desc(RvuScan.scanned_at)).offset(offset).limit(limit + 1).all()
     has_more = len(rows) > limit
     scans = [_portal_scan_list_row_dict(row) for row in rows[:limit]]
     return {
