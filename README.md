@@ -18,6 +18,7 @@ rvu-5.61:/opt/rvu
 
 There is no separate active portal repo. The only portal/staff web app is `frontend/`.
 See [`docs/REPO_SOURCE_OF_TRUTH.md`](docs/REPO_SOURCE_OF_TRUTH.md).
+Project structure policy lives at [`docs/PROJECT_STRUCTURE_STANDARD.md`](docs/PROJECT_STRUCTURE_STANDARD.md).
 
 ## Layout
 

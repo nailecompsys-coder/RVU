@@ -2,6 +2,8 @@
 
 This document exists to prevent split-repo drift.
 
+For the product-wide folder policy, see `docs/PROJECT_STRUCTURE_STANDARD.md`.
+
 ## Canonical Paths
 
 | Surface | Local path | Production path | Git |
