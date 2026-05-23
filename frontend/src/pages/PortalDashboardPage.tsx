@@ -65,28 +65,10 @@ function Spinner({ className = "w-4 h-4" }: { className?: string }) {
   );
 }
 
-function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return (
-    <div className="card flex-1 min-w-[130px] px-5 py-4">
-      <div className="label mb-1.5">{label}</div>
-      <div className="text-2xl font-black text-ink tracking-tight">{value}</div>
-      {sub && <div className="text-xs text-ink-secondary mt-0.5">{sub}</div>}
-    </div>
-  );
-}
-
-function CompactStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="border border-brand-border bg-surface px-4 py-3">
-      <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">{label}</div>
-      <div className="mt-1 text-xl font-black text-ink tabular-nums">{value}</div>
-    </div>
-  );
-}
-
 // ── Table shared styles ────────────────────────────────────────────────────────
 const TH = "px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-ink-secondary whitespace-nowrap border-b-2 border-brand-border bg-surface-soft text-left";
 const TD = "px-3 py-2.5 text-sm border-b border-brand-border/60 align-top";
+const GROUP_TD = "px-3 py-2 text-[10px] font-black uppercase tracking-wide text-ink-secondary bg-surface-soft border-y border-brand-border";
 
 type LineItem = {
   cpt?: string;
@@ -181,6 +163,20 @@ function prettyJson(value: unknown): string {
 
 function isPrimaryOcrRun(run: PortalScanAiRun): boolean {
   return run.stage === "vision_primary" || run.stage === "text_primary";
+}
+
+function providerRoleRank(role: string | null | undefined): number {
+  const value = role?.trim().toLowerCase();
+  if (value === "physician") return 0;
+  if (value === "pa" || value === "physician_assistant") return 1;
+  return 2;
+}
+
+function providerGroupLabel(role: string | null | undefined): string {
+  const rank = providerRoleRank(role);
+  if (rank === 0) return "Surgeons";
+  if (rank === 1) return "PA-C";
+  return "Other Staff";
 }
 
 // ── Inline edit row ────────────────────────────────────────────────────────────
@@ -564,10 +560,30 @@ export default function PortalDashboardPage() {
     return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
   }, [scans]);
 
-  const selectedProvider = useMemo<PortalDashboardProvider | null>(() => {
-    if (!dashboard || selectedProviderId === null) return null;
-    return dashboard.providers.find((provider) => provider.provider_id === selectedProviderId) ?? null;
-  }, [dashboard, selectedProviderId]);
+  const groupedProviders = useMemo(() => {
+    if (!dashboard) return [];
+    const sorted = dashboard.providers.slice().sort((a, b) => {
+      const roleDiff = providerRoleRank(a.role) - providerRoleRank(b.role);
+      if (roleDiff !== 0) return roleDiff;
+      const wrvuDiff = b.wrvu - a.wrvu;
+      if (wrvuDiff !== 0) return wrvuDiff;
+      return a.provider_name.localeCompare(b.provider_name);
+    });
+    const rows: Array<
+      | { type: "group"; key: string; label: string }
+      | { type: "provider"; key: string; provider: PortalDashboardProvider }
+    > = [];
+    let lastGroup = "";
+    sorted.forEach((provider) => {
+      const group = providerGroupLabel(provider.role);
+      if (group !== lastGroup) {
+        rows.push({ type: "group", key: `group-${group}`, label: group });
+        lastGroup = group;
+      }
+      rows.push({ type: "provider", key: `provider-${provider.provider_id}`, provider });
+    });
+    return rows;
+  }, [dashboard]);
 
   const selectedProviderPeriods = useMemo(() => {
     if (!dashboard || selectedProviderId === null) return [];
@@ -741,18 +757,7 @@ export default function PortalDashboardPage() {
 
             {dashboard && (
               <div className="space-y-4 mb-6">
-                <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 overflow-hidden rounded-xl border border-brand-border bg-surface">
-                  <CompactStat label="Patients" value={String(dashboard.practice.patients)} />
-                  <CompactStat label="Scans" value={String(dashboard.practice.scans)} />
-                  <CompactStat label="CPT Lines" value={String(dashboard.practice.cpt_lines)} />
-                  <CompactStat label="wRVU" value={dashboard.practice.wrvu.toFixed(2)} />
-                  <CompactStat label="Est. $" value={fmt$(dashboard.practice.est_payment)} />
-                  <CompactStat label="Avg wRVU / Patient" value={dashboard.practice.avg_wrvu_per_patient.toFixed(2)} />
-                  <CompactStat label="Active Scanners" value={String(dashboard.practice.active_scanners)} />
-                  <CompactStat label="Not Scanning" value={String(dashboard.practice.inactive_scanners)} />
-                </div>
-
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(360px,0.8fr)]">
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.75fr)]">
                   <div className="card overflow-hidden">
                     <div className="px-4 py-3 border-b border-brand-border">
                       <h2 className="text-sm font-black text-ink uppercase tracking-wide">Provider Production</h2>
@@ -767,14 +772,23 @@ export default function PortalDashboardPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {dashboard.providers.map((provider) => {
+                          {groupedProviders.map((row) => {
+                            if (row.type === "group") {
+                              return (
+                                <tr key={row.key}>
+                                  <td colSpan={9} className={GROUP_TD}>{row.label}</td>
+                                </tr>
+                              );
+                            }
+                            const { provider } = row;
                             const selected = selectedProviderId === provider.provider_id;
-                            return (
+                            return [
                               <tr
-                                key={provider.provider_id}
+                                key={row.key}
                                 onClick={() => {
-                                  setSelectedProviderId(provider.provider_id);
-                                  setFilterSurgeon(String(provider.provider_id));
+                                  const nextProviderId = selected ? null : provider.provider_id;
+                                  setSelectedProviderId(nextProviderId);
+                                  setFilterSurgeon(nextProviderId === null ? "all" : String(nextProviderId));
                                 }}
                                 className={`cursor-pointer transition-colors ${selected ? "bg-brand-muted/70" : "hover:bg-surface-soft"}`}
                               >
@@ -787,8 +801,40 @@ export default function PortalDashboardPage() {
                                 <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(provider.est_payment)}</td>
                                 <td className={`${TD} text-right font-mono tabular-nums`}>{provider.avg_wrvu_per_patient.toFixed(2)}</td>
                                 <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{provider.last_scan ? fmtDateTimeEt(provider.last_scan) : "—"}</td>
-                              </tr>
-                            );
+                              </tr>,
+                              selected && (
+                                <tr key={`${row.key}-detail`} className="bg-brand-muted/30">
+                                  <td colSpan={9} className="p-0 border-b border-brand-border">
+                                    <div className="overflow-x-auto px-4 py-3">
+                                      <table className="w-full border-collapse" style={{ minWidth: 620 }}>
+                                        <thead>
+                                          <tr>
+                                            {["Period", "Patients", "Scans", "CPTs", "wRVU", "Est. $"].map((h, i) => (
+                                              <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
+                                            ))}
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {selectedProviderPeriods.length === 0 && (
+                                            <tr><td colSpan={6} className="px-4 py-5 text-center text-ink-secondary text-sm">No scans in range.</td></tr>
+                                          )}
+                                          {selectedProviderPeriods.map((period) => (
+                                            <tr key={`${period.provider_id}-${period.period_key}`} className="bg-surface">
+                                              <td className={`${TD} font-semibold`}>{period.period_label}</td>
+                                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.patients}</td>
+                                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.scans}</td>
+                                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.cpt_lines}</td>
+                                              <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{period.wrvu.toFixed(2)}</td>
+                                              <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(period.est_payment)}</td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ),
+                            ];
                           })}
                         </tbody>
                       </table>
@@ -854,42 +900,6 @@ export default function PortalDashboardPage() {
                     </div>
                   </div>
 
-                  <div className="card overflow-hidden">
-                    <div className="px-4 py-3 border-b border-brand-border">
-                      <h2 className="text-sm font-black text-ink uppercase tracking-wide">
-                        {selectedProvider ? selectedProvider.provider_name : "Provider Drilldown"}
-                      </h2>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full border-collapse" style={{ minWidth: 620 }}>
-                        <thead>
-                          <tr>
-                            {["Period", "Patients", "Scans", "CPTs", "wRVU", "Est. $"].map((h, i) => (
-                              <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {!selectedProvider && (
-                            <tr><td colSpan={6} className="px-4 py-10 text-center text-ink-secondary text-sm">Select a provider row.</td></tr>
-                          )}
-                          {selectedProvider && selectedProviderPeriods.length === 0 && (
-                            <tr><td colSpan={6} className="px-4 py-10 text-center text-ink-secondary text-sm">No scans in range.</td></tr>
-                          )}
-                          {selectedProviderPeriods.map((period) => (
-                            <tr key={`${period.provider_id}-${period.period_key}`} className="hover:bg-surface-soft">
-                              <td className={`${TD} font-semibold`}>{period.period_label}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.patients}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.scans}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.cpt_lines}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{period.wrvu.toFixed(2)}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(period.est_payment)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
                 </div>
               </div>
             )}
