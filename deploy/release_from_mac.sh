@@ -84,5 +84,5 @@ scp "${REPO_ROOT}/deploy/deploy_backend_from_bundle.sh" "${SSH_HOST}:/tmp/deploy
 ssh "${SSH_HOST}" "set -euo pipefail
 sudo install -m 755 /tmp/deploy_backend_from_bundle.sh '${REMOTE_DEPLOY_SCRIPT}'
 rm -f /tmp/deploy_backend_from_bundle.sh
-RVU_LIVE_DIR='${REMOTE_LIVE_DIR}' bash '${REMOTE_DEPLOY_SCRIPT}' '${REMOTE_BUNDLE}' '${DEPLOY_SHA}'
+sudo env RVU_LIVE_DIR='${REMOTE_LIVE_DIR}' bash '${REMOTE_DEPLOY_SCRIPT}' '${REMOTE_BUNDLE}' '${DEPLOY_SHA}'
 "
