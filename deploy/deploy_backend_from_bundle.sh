@@ -68,6 +68,15 @@ if [ ! -d "${WORK_DIR}/frontend/dist" ]; then
 fi
 
 log "syncing bundle into live docker context"
+rm -rf \
+  "${LIVE_DIR}/CLAUDE.md" \
+  "${LIVE_DIR}/CURSOR_MAC_RECOVERY.md" \
+  "${LIVE_DIR}/docs/from-cal" \
+  "${LIVE_DIR}/docs/from-cal-cursor" \
+  "${LIVE_DIR}/docs/CURSOR_WORKFLOW.md" \
+  "${LIVE_DIR}/_backup_codex" \
+  "${LIVE_BACKEND_DIR}/app.backup." \
+  "${LIVE_BACKEND_DIR}/app.backup"
 rm -rf "${LIVE_BACKEND_DIR}/app"
 cp -a "${WORK_DIR}/backend/app" "${LIVE_BACKEND_DIR}/app"
 install -m 644 "${WORK_DIR}/backend/requirements.txt" "${LIVE_BACKEND_DIR}/requirements.txt"
