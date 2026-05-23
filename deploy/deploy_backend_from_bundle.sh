@@ -94,6 +94,7 @@ docker compose up -d rvu_api
 
 if wait_for_health; then
   log "health check passed"
+  printf "%s\n" "${DEPLOY_SHA}" > "${LIVE_DIR}/deploy/DEPLOYED_SHA"
   rm -rf "${WORK_DIR}"
   rm -f "${BUNDLE_PATH}"
   echo "deployed_sha=${DEPLOY_SHA}"

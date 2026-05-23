@@ -86,6 +86,10 @@ ssh -o BatchMode=yes -o ConnectTimeout=8 rvu-5.61 '
   git status --short --branch
   printf "HEAD: "
   git rev-parse --short HEAD
+  if [ -f /opt/rvu/deploy/DEPLOYED_SHA ]; then
+    printf "deployed bundle sha: "
+    cat /opt/rvu/deploy/DEPLOYED_SHA
+  fi
   printf "portal dirs under /opt/rvu: "
   find /opt/rvu -maxdepth 2 -type d -name portal | wc -l
   test -d /opt/rvu/frontend && echo "frontend: /opt/rvu/frontend"

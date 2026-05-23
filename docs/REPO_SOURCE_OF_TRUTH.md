@@ -60,3 +60,4 @@ deploy/release_from_mac.sh rvu-prod
 ```
 
 That script builds `frontend/dist`, bundles the backend, frontend build, Dockerfile, compose file, and deploy scripts, then installs them into `rvu-5.61:/opt/rvu`.
+The VM is updated from a bundle, so `/opt/rvu` Git status is not the deploy authority. The deployed bundle SHA is recorded at `/opt/rvu/deploy/DEPLOYED_SHA`.
