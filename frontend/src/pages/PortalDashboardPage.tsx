@@ -65,6 +65,15 @@ function Spinner({ className = "w-4 h-4" }: { className?: string }) {
   );
 }
 
+function DetailMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border border-brand-border bg-surface-soft px-3 py-2">
+      <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">{label}</div>
+      <div className="mt-1 text-sm font-black text-ink tabular-nums">{value}</div>
+    </div>
+  );
+}
+
 // ── Table shared styles ────────────────────────────────────────────────────────
 const TH = "px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-ink-secondary whitespace-nowrap border-b-2 border-brand-border bg-surface-soft text-left";
 const TD = "px-3 py-2.5 text-sm border-b border-brand-border/60 align-top";
@@ -179,6 +188,22 @@ function providerGroupLabel(role: string | null | undefined): string {
   return "Other Staff";
 }
 
+function etDateKey(value: string | null | undefined): string {
+  if (!value) return "";
+  const directEt = value.match(/^(\d{4}-\d{2}-\d{2})T/);
+  if (directEt && (value.includes("-04:00") || value.includes("-05:00"))) return directEt[1];
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
 // ── Inline edit row ────────────────────────────────────────────────────────────
 interface EditRowProps {
   scan: PortalScanRow;
@@ -270,11 +295,6 @@ export default function PortalDashboardPage() {
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardErr, setDashboardErr] = useState<string | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
-
-  const [filterSurgeon, setFilterSurgeon] = useState("all");
-  const [filterFrom, setFilterFrom] = useState("");
-  const [filterTo, setFilterTo] = useState("");
-  const [filterFacility, setFilterFacility] = useState("all");
 
   const [imageModal, setImageModal] = useState<number | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
@@ -469,96 +489,44 @@ export default function PortalDashboardPage() {
     } finally { setDeletingId(null); }
   };
 
-  const scanSummary = useMemo(() => {
+  const todayScanSummary = useMemo(() => {
+    const todayKey = etDateKey(new Date().toISOString());
     const rows: { scan: PortalScanRow; fin: ReturnType<typeof financialBreakdown> }[] = [];
-    const staffIds = new Set<number>();
     let totalRvu = 0;
     let totalPay = 0;
-    let totalWorkRvu = 0;
-    let totalSurgeonValue = 0;
     let totalFacilityValue = 0;
 
     for (const s of scans) {
-      if (filterSurgeon !== "all" && String(s.surgeon_id) !== filterSurgeon) continue;
-      const dateKey = s.service_date ?? s.scanned_at?.slice(0, 10) ?? "";
-      if (filterFrom && dateKey < filterFrom) continue;
-      if (filterTo && dateKey > filterTo) continue;
-      if (filterFacility === "fac" && !s.facility) continue;
-      if (filterFacility === "nonfac" && s.facility) continue;
+      const scannedDay = s.scanned_at_et?.slice(0, 10) || etDateKey(s.scanned_at);
+      if (scannedDay !== todayKey) continue;
 
       const fin = listFinancialSummary(s);
       rows.push({ scan: s, fin });
       totalRvu += s.total_rvu ?? 0;
       totalPay += s.total_payment ?? 0;
-      totalWorkRvu += fin.workRvu;
-      totalSurgeonValue += fin.surgeonValue;
       totalFacilityValue += fin.facilityShare;
-      staffIds.add(s.surgeon_id);
     }
 
+    rows.sort((a, b) => String(b.scan.scanned_at ?? "").localeCompare(String(a.scan.scanned_at ?? "")));
+
     return {
-      filteredRows: rows,
-      filtered: rows.map(({ scan }) => scan),
+      rows,
+      scans: rows.map(({ scan }) => scan),
       totalRvu,
       totalPay,
-      totalWorkRvu,
-      totalSurgeonValue,
       totalFacilityValue,
-      uniqueStaff: staffIds.size,
+      dateKey: todayKey,
     };
-  }, [scans, filterSurgeon, filterFrom, filterTo, filterFacility]);
+  }, [scans]);
 
   const {
-    filteredRows,
-    filtered,
+    rows: todayScanRows,
+    scans: todayScans,
     totalRvu,
     totalPay,
     totalFacilityValue,
-  } = scanSummary;
-
-  const downloadScanReport = () => {
-    const head = ["Scanned", "DOS", "Staff", "Role", "Setting", "CPT Count", "Total RVU", "wRVU", "Value$", "Facility$", "Total Payment", "AS Assist Lines"];
-    const rows = filteredRows.map(({ scan: s, fin }) => {
-      return [
-        fmtDateTimeEt(s.scanned_at),
-        fmtCalendarDateMdY(s.service_date),
-        s.surgeon_name ?? "",
-        s.staff_type ?? "",
-        s.facility ? "Facility" : "Non-Facility",
-        String(fin.cptCount),
-        (s.total_rvu ?? 0).toFixed(2),
-        fin.workRvu.toFixed(2),
-        fin.surgeonValue.toFixed(2),
-        fin.facilityShare.toFixed(2),
-        fin.totalPayment.toFixed(2),
-        String(fin.assistCount),
-      ];
-    });
-    const csv = [head, ...rows]
-      .map((r) =>
-        r
-          .map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`)
-          .join(",")
-      )
-      .join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    const from = filterFrom || "start";
-    const to = filterTo || "today";
-    a.href = url;
-    a.download = `rvu-scan-report-${from}-to-${to}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const uniqueSurgeons = useMemo(() => {
-    const seen = new Map<number, string>();
-    scans.forEach((s) => { if (s.surgeon_id) seen.set(s.surgeon_id, s.surgeon_name ?? String(s.surgeon_id)); });
-    return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-  }, [scans]);
+    dateKey: todayKey,
+  } = todayScanSummary;
 
   const groupedProviders = useMemo(() => {
     if (!dashboard) return [];
@@ -641,7 +609,7 @@ export default function PortalDashboardPage() {
     );
   }
 
-  const COL_COUNT = 12;
+  const COL_COUNT = 13;
 
   const navItems: { id: Tab; label: string }[] = [
     { id: "scans", label: "Scans" },
@@ -710,7 +678,7 @@ export default function PortalDashboardPage() {
 
         {/* ══════════════ SCANS TAB ══════════════ */}
         {tab === "scans" && (
-          <>
+          <div className="flex flex-col">
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px] mb-4">
               <div>
                 <h1 className="text-xl font-black text-ink tracking-tight">Practice Dashboard</h1>
@@ -756,8 +724,8 @@ export default function PortalDashboardPage() {
             )}
 
             {dashboard && (
-              <div className="space-y-4 mb-6">
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.75fr)]">
+              <div className="space-y-4 mb-6 order-2">
+                <div className="grid gap-4">
                   <div className="card overflow-hidden">
                     <div className="px-4 py-3 border-b border-brand-border">
                       <h2 className="text-sm font-black text-ink uppercase tracking-wide">Provider Production</h2>
@@ -788,7 +756,6 @@ export default function PortalDashboardPage() {
                                 onClick={() => {
                                   const nextProviderId = selected ? null : provider.provider_id;
                                   setSelectedProviderId(nextProviderId);
-                                  setFilterSurgeon(nextProviderId === null ? "all" : String(nextProviderId));
                                 }}
                                 className={`cursor-pointer transition-colors ${selected ? "bg-brand-muted/70" : "hover:bg-surface-soft"}`}
                               >
@@ -840,34 +807,6 @@ export default function PortalDashboardPage() {
                       </table>
                     </div>
                   </div>
-
-                  <div className="card overflow-hidden">
-                    <div className="px-4 py-3 border-b border-brand-border">
-                      <h2 className="text-sm font-black text-ink uppercase tracking-wide">Period Trend</h2>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full border-collapse" style={{ minWidth: 520 }}>
-                        <thead>
-                          <tr>
-                            {["Period", "Patients", "Scans", "wRVU", "Est. $"].map((h, i) => (
-                              <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {dashboard.periods.map((period) => (
-                            <tr key={period.period_key} className="hover:bg-surface-soft">
-                              <td className={`${TD} font-semibold`}>{period.period_label}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.patients}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.scans}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{period.wrvu.toFixed(2)}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(period.est_payment)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
                 </div>
 
                 <div className="grid gap-4 xl:grid-cols-2">
@@ -910,62 +849,31 @@ export default function PortalDashboardPage() {
               </div>
             )}
 
-            {/* Filters */}
+            <div className="order-1 mb-6">
             <div className="flex items-center justify-between gap-3 mb-3">
-              <h2 className="text-sm font-black text-ink uppercase tracking-wide">Scan Detail</h2>
-            </div>
-            <div className="card px-4 py-3.5 mb-4 flex flex-wrap gap-4 items-end">
-              {[
-                { label: "Staff", content: (
-                  <select className="input text-xs w-auto" value={filterSurgeon} onChange={(e) => setFilterSurgeon(e.target.value)}>
-                    <option value="all">All staff</option>
-                    {uniqueSurgeons.map(([id, name]) => <option key={id} value={String(id)}>{name}</option>)}
-                  </select>
-                )},
-                { label: "From", content: <input type="date" className="input text-xs w-auto" value={filterFrom} onChange={(e) => setFilterFrom(e.target.value)} /> },
-                { label: "To",   content: <input type="date" className="input text-xs w-auto" value={filterTo}   onChange={(e) => setFilterTo(e.target.value)} /> },
-                { label: "Setting", content: (
-                  <select className="input text-xs w-auto" value={filterFacility} onChange={(e) => setFilterFacility(e.target.value)}>
-                    <option value="all">All</option>
-                    <option value="nonfac">Non-Facility</option>
-                    <option value="fac">Facility</option>
-                  </select>
-                )},
-              ].map(({ label, content }) => (
-                <div key={label}>
-                  <label className="label">{label}</label>
-                  {content}
-                </div>
-              ))}
-              {(filterSurgeon !== "all" || filterFrom || filterTo || filterFacility !== "all") && (
-                <button
-                  onClick={() => { setFilterSurgeon("all"); setFilterFrom(""); setFilterTo(""); setFilterFacility("all"); }}
-                  className="btn-secondary text-xs px-3 py-2"
-                >Clear filters</button>
-              )}
-              <button onClick={downloadScanReport} className="btn-primary text-xs px-3 py-2">Export report</button>
+              <h2 className="text-sm font-black text-ink uppercase tracking-wide">Today's Scans</h2>
+              <span className="text-xs font-semibold text-ink-secondary">{todayKey}</span>
             </div>
 
-            {/* Scans table */}
             <div className="card overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 1040 }}>
+                <table className="w-full border-collapse" style={{ minWidth: 1120 }}>
                   <thead>
                     <tr>
-                      {["", "Scanned", "DOS", "MRN", "Staff", "Type", "Setting", "CPTs", "Total RVU", "Facility$", "Payment", ""].map((h, i) => (
+                      {["", "Scanned", "DOS", "MRN", "Staff", "Type", "Setting", "CPTs", "Total RVU", "Facility$", "Payment", "OCR", ""].map((h, i) => (
                         <th key={i} className={`${TH} ${i >= 8 && i < 11 ? "text-right" : "text-left"}`}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.length === 0 && (
+                    {todayScans.length === 0 && (
                       <tr>
                         <td colSpan={COL_COUNT} className="px-4 py-10 text-center text-ink-secondary text-sm">
-                          No scans match the current filters.
+                          No scans since midnight.
                         </td>
                       </tr>
                     )}
-                    {filteredRows.map(({ scan: s, fin }) => {
+                    {todayScanRows.map(({ scan: s, fin }) => {
                       const isEditing = editId === s.id;
                       const isDeleteConfirm = deleteConfirmId === s.id;
                       const isDeleting = deletingId === s.id;
@@ -1016,6 +924,7 @@ export default function PortalDashboardPage() {
                           <td className={`${TD} text-right font-mono tabular-nums text-sm`}>{(s.total_rvu ?? 0).toFixed(2)}</td>
                           <td className={`${TD} text-right font-mono tabular-nums text-sm`}>{fmt$(fin.facilityShare)}</td>
                           <td className={`${TD} text-right font-bold text-green-700 font-mono tabular-nums text-sm`}>{fmt$(s.total_payment ?? 0)}</td>
+                          <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{s.ocr_elapsed_label || "—"}</td>
                           {/* Actions */}
                           <td className={`${TD} text-right whitespace-nowrap`}>
                             {isEditing ? null : isDeleteConfirm ? (
@@ -1079,16 +988,16 @@ export default function PortalDashboardPage() {
                       ];
                     })}
                   </tbody>
-                  {filtered.length > 0 && (
+                  {todayScans.length > 0 && (
                     <tfoot>
                       <tr className="bg-surface-soft">
                         <td colSpan={8} className="px-3 py-3 font-bold text-xs text-ink-secondary border-t-2 border-ink">
-                          Totals ({filtered.length} scan{filtered.length !== 1 ? "s" : ""})
+                          Totals ({todayScans.length} scan{todayScans.length !== 1 ? "s" : ""})
                         </td>
                         <td className="px-3 py-3 text-right font-black font-mono tabular-nums text-sm border-t-2 border-ink">{totalRvu.toFixed(2)}</td>
                         <td className="px-3 py-3 text-right font-black text-ink font-mono tabular-nums text-sm border-t-2 border-ink">{fmt$(totalFacilityValue)}</td>
                         <td className="px-3 py-3 text-right font-black text-green-700 font-mono tabular-nums text-sm border-t-2 border-ink">{fmt$(totalPay)}</td>
-                        <td className="border-t-2 border-ink" />
+                        <td colSpan={2} className="border-t-2 border-ink" />
                       </tr>
                     </tfoot>
                   )}
@@ -1110,7 +1019,8 @@ export default function PortalDashboardPage() {
                 </div>
               )}
             </div>
-          </>
+            </div>
+          </div>
         )}
 
         {/* ══════════════ STAFF TAB ══════════════ */}
@@ -1573,16 +1483,16 @@ export default function PortalDashboardPage() {
               <span className="text-xs text-ink-secondary">Scanned: {fmtDateTimeEt(detailScan.scanned_at)}</span>
               <button onClick={() => setDetailScan(null)} className="ml-auto btn-secondary text-xs px-3 py-1.5">Close</button>
             </div>
-            {(() => {
-              const fin = financialBreakdown(detailScan);
-              return (
-                <div className="p-5 space-y-4">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <StatCard label="Total RVU" value={(detailScan.total_rvu ?? 0).toFixed(2)} />
-                    <StatCard label="wRVU (doctor)" value={fin.workRvu.toFixed(2)} />
-                    <StatCard label="Value$ (doctor)" value={fmt$(fin.surgeonValue)} />
-                    <StatCard label="Facility share" value={fmt$(fin.facilityShare)} />
-                  </div>
+	            {(() => {
+	              const fin = financialBreakdown(detailScan);
+	              return (
+	                <div className="p-5 space-y-4">
+	                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+	                    <DetailMetric label="Total RVU" value={(detailScan.total_rvu ?? 0).toFixed(2)} />
+	                    <DetailMetric label="wRVU" value={fin.workRvu.toFixed(2)} />
+	                    <DetailMetric label="Value" value={fmt$(fin.surgeonValue)} />
+	                    <DetailMetric label="Facility" value={fmt$(fin.facilityShare)} />
+	                  </div>
                   <div className="text-xs text-ink-secondary">
                     Total payment: <span className="font-semibold text-ink">{fmt$(fin.totalPayment)}</span>{" "}
                     · AS assist lines: <span className="font-semibold text-ink">{fin.assistCount}</span>
