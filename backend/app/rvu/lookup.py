@@ -96,6 +96,12 @@ COMMERCIAL_CONSULT_OVERRIDES: dict[str, RvuRow] = {
     "99255": RvuRow("Inpatient consultation, high complexity", 4.50, 0.0, 0.0, 0.0),
 }
 
+PRACTICE_RVU_OVERRIDES: dict[str, RvuRow] = {
+    # MFS compensation reconciliation uses 9.30 wRVU for laparoscopic initial
+    # inguinal hernia repair; modifier -50 is applied on top of that base.
+    "49650": RvuRow("Lap ing hernia repair init", 9.30, 4.87, 4.87, 1.63),
+}
+
 
 @dataclass
 class PaymentResult:
@@ -139,6 +145,7 @@ def _rvu_table() -> dict[str, RvuRow]:
                 mp_rvu=float(row["mp_rvu"] or 0),
             )
     table.update(COMMERCIAL_CONSULT_OVERRIDES)
+    table.update(PRACTICE_RVU_OVERRIDES)
     return table
 
 
@@ -196,14 +203,13 @@ def calc_payment(
     adj_work = rvu.work_rvu * gpci.pw_gpci
     adj_pe = pe * gpci.pe_gpci
     adj_mp = rvu.mp_rvu * gpci.mp_gpci
-    total_rvu = adj_work + adj_pe + adj_mp
-
     mod_code, mod_factor, mod_desc = _resolve_modifier(modifier, modifier_rules=modifier_rules)
 
-    work_payment = round(adj_work * cf * mod_factor, 2)
+    adjusted_work_rvu = rvu.work_rvu * mod_factor
+    work_payment = round(adjusted_work_rvu * cf, 2)
     pe_payment = round(adj_pe * cf * mod_factor, 2)
     mp_payment = round(adj_mp * cf * mod_factor, 2)
-    payment = round(total_rvu * cf * mod_factor, 2)
+    payment = work_payment
 
     return PaymentResult(
         cpt=cpt,
@@ -212,7 +218,7 @@ def calc_payment(
         modifier_code=mod_code,
         modifier_factor=mod_factor,
         modifier_desc=mod_desc,
-        work_rvu=round(rvu.work_rvu * mod_factor, 2),
+        work_rvu=round(adjusted_work_rvu, 2),
         pe_rvu=round(pe * mod_factor, 2),
         pe_nonfac_rvu=round(rvu.pe_nonfac_rvu, 2),
         pe_fac_rvu=round(rvu.pe_fac_rvu, 2),
@@ -220,7 +226,7 @@ def calc_payment(
         pw_gpci=gpci.pw_gpci,
         pe_gpci=gpci.pe_gpci,
         mp_gpci=gpci.mp_gpci,
-        total_rvu=round(total_rvu * mod_factor, 2),
+        total_rvu=round(adjusted_work_rvu, 2),
         locality=gpci.locality_name,
         facility=facility,
         cf=cf,
