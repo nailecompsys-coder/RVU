@@ -4,6 +4,7 @@ import {
   api,
   type DeviceRecord,
   type PortalMe,
+  type PortalDashboardDrilldownResponse,
   type PortalDashboardResponse,
   type PortalDashboardProvider,
   type PortalScanAiRun,
@@ -295,6 +296,10 @@ export default function PortalDashboardPage() {
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardErr, setDashboardErr] = useState<string | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
+  const [selectedProviderPeriodKey, setSelectedProviderPeriodKey] = useState<string | null>(null);
+  const [periodDrilldown, setPeriodDrilldown] = useState<PortalDashboardDrilldownResponse | null>(null);
+  const [periodDrilldownLoading, setPeriodDrilldownLoading] = useState(false);
+  const [periodDrilldownErr, setPeriodDrilldownErr] = useState<string | null>(null);
 
   const [imageModal, setImageModal] = useState<number | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
@@ -412,6 +417,7 @@ export default function PortalDashboardPage() {
         setDashboard(payload);
         if (selectedProviderId && !payload.providers.some((provider) => provider.provider_id === selectedProviderId)) {
           setSelectedProviderId(null);
+          setSelectedProviderPeriodKey(null);
         }
       })
       .catch((e: unknown) => {
@@ -422,6 +428,35 @@ export default function PortalDashboardPage() {
       });
     return () => { cancelled = true; };
   }, [admin, dashboardRange, dashboardGroupBy]);
+
+  useEffect(() => {
+    if (!admin || selectedProviderId === null || !selectedProviderPeriodKey) {
+      setPeriodDrilldown(null);
+      setPeriodDrilldownErr(null);
+      setPeriodDrilldownLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPeriodDrilldownLoading(true);
+    setPeriodDrilldownErr(null);
+    api.portalDashboardDrilldown({
+      range: dashboardRange,
+      groupBy: dashboardGroupBy,
+      providerId: selectedProviderId,
+      periodKey: selectedProviderPeriodKey,
+      limit: 250,
+    })
+      .then((payload) => {
+        if (!cancelled) setPeriodDrilldown(payload);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setPeriodDrilldownErr(e instanceof Error ? e.message : "Could not load period detail.");
+      })
+      .finally(() => {
+        if (!cancelled) setPeriodDrilldownLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [admin, dashboardRange, dashboardGroupBy, selectedProviderId, selectedProviderPeriodKey]);
 
   const logout = async () => {
     await api.portalLogout();
@@ -555,7 +590,10 @@ export default function PortalDashboardPage() {
 
   const selectedProviderPeriods = useMemo(() => {
     if (!dashboard || selectedProviderId === null) return [];
-    return dashboard.provider_periods.filter((period) => period.provider_id === selectedProviderId);
+    return dashboard.provider_periods
+      .filter((period) => period.provider_id === selectedProviderId)
+      .slice()
+      .sort((a, b) => b.period_key.localeCompare(a.period_key));
   }, [dashboard, selectedProviderId]);
 
   const startStaffEdit = (s: StaffMember) => {
@@ -756,6 +794,8 @@ export default function PortalDashboardPage() {
                                 onClick={() => {
                                   const nextProviderId = selected ? null : provider.provider_id;
                                   setSelectedProviderId(nextProviderId);
+                                  setSelectedProviderPeriodKey(null);
+                                  setPeriodDrilldown(null);
                                 }}
                                 className={`cursor-pointer transition-colors ${selected ? "bg-brand-muted/70" : "hover:bg-surface-soft"}`}
                               >
@@ -785,16 +825,127 @@ export default function PortalDashboardPage() {
                                           {selectedProviderPeriods.length === 0 && (
                                             <tr><td colSpan={6} className="px-4 py-5 text-center text-ink-secondary text-sm">No scans in range.</td></tr>
                                           )}
-                                          {selectedProviderPeriods.map((period) => (
-                                            <tr key={`${period.provider_id}-${period.period_key}`} className="bg-surface">
-                                              <td className={`${TD} font-semibold`}>{period.period_label}</td>
-                                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.patients}</td>
-                                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.scans}</td>
-                                              <td className={`${TD} text-right font-mono tabular-nums`}>{period.cpt_lines}</td>
-                                              <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{period.wrvu.toFixed(2)}</td>
-                                              <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(period.est_payment)}</td>
-                                            </tr>
-                                          ))}
+                                          {selectedProviderPeriods.map((period) => {
+                                            const periodSelected = selectedProviderPeriodKey === period.period_key;
+                                            return [
+                                              <tr
+                                                key={`${period.provider_id}-${period.period_key}`}
+                                                onClick={() => setSelectedProviderPeriodKey(periodSelected ? null : period.period_key)}
+                                                className={`cursor-pointer ${periodSelected ? "bg-brand-muted/70" : "bg-surface hover:bg-surface-soft"}`}
+                                              >
+                                                <td className={`${TD} font-semibold`}>{period.period_label}</td>
+                                                <td className={`${TD} text-right font-mono tabular-nums`}>{period.patients}</td>
+                                                <td className={`${TD} text-right font-mono tabular-nums`}>{period.scans}</td>
+                                                <td className={`${TD} text-right font-mono tabular-nums`}>{period.cpt_lines}</td>
+                                                <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{period.wrvu.toFixed(2)}</td>
+                                                <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(period.est_payment)}</td>
+                                              </tr>,
+                                              periodSelected && (
+                                                <tr key={`${period.provider_id}-${period.period_key}-drill`} className="bg-surface">
+                                                  <td colSpan={6} className="p-0 border-b border-brand-border">
+                                                    <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(360px,0.8fr)]">
+                                                      <div className="overflow-x-auto">
+                                                        <table className="w-full border-collapse" style={{ minWidth: 900 }}>
+                                                          <thead>
+                                                            <tr>
+                                                              {["Scanned", "DOS", "MRN", "Patient", "CPTs", "wRVU", "Payment", "OCR", ""].map((h, i) => (
+                                                                <th key={h} className={`${TH} ${i >= 5 && i <= 6 ? "text-right" : "text-left"}`}>{h}</th>
+                                                              ))}
+                                                            </tr>
+                                                          </thead>
+                                                          <tbody>
+                                                            {periodDrilldownLoading && (
+                                                              <tr><td colSpan={9} className="px-4 py-5 text-sm text-ink-secondary"><span className="inline-flex items-center gap-2"><Spinner /> Loading...</span></td></tr>
+                                                            )}
+                                                            {periodDrilldownErr && (
+                                                              <tr><td colSpan={9} className="px-4 py-5 text-sm text-red-600">{periodDrilldownErr}</td></tr>
+                                                            )}
+                                                            {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.length === 0 && (
+                                                              <tr><td colSpan={9} className="px-4 py-5 text-sm text-ink-secondary">No entries.</td></tr>
+                                                            )}
+                                                            {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.map((scan) => {
+                                                              const fin = listFinancialSummary(scan);
+                                                              return (
+                                                                <tr key={scan.id} className="hover:bg-surface-soft">
+                                                                  <td className={`${TD} text-xs whitespace-nowrap`}>{fmtDateTimeEt(scan.scanned_at)}</td>
+                                                                  <td className={`${TD} text-xs whitespace-nowrap`}>{fmtCalendarDateMdY(scan.service_date)}</td>
+                                                                  <td className={`${TD} font-mono text-xs`}>{scan.mrn || "—"}</td>
+                                                                  <td className={`${TD} text-xs`}>{scan.patient_name || "—"}</td>
+                                                                  <td className={`${TD} text-right font-mono tabular-nums`}>{fin.cptCount}</td>
+                                                                  <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{(scan.total_rvu ?? 0).toFixed(2)}</td>
+                                                                  <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(scan.total_payment ?? 0)}</td>
+                                                                  <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{scan.ocr_elapsed_label || "—"}</td>
+                                                                  <td className={`${TD} text-right`}>
+                                                                    <button
+                                                                      type="button"
+                                                                      onClick={() => void openScanDetails(scan.id)}
+                                                                      disabled={detailLoadingId === scan.id}
+                                                                      className="text-ink text-xs font-semibold border border-brand-border rounded-lg px-2.5 py-1 hover:bg-surface-soft transition-colors disabled:opacity-60"
+                                                                    >
+                                                                      {detailLoadingId === scan.id ? <Spinner className="w-3 h-3" /> : "Details"}
+                                                                    </button>
+                                                                  </td>
+                                                                </tr>
+                                                              );
+                                                            })}
+                                                          </tbody>
+                                                        </table>
+                                                      </div>
+                                                      <div className="grid gap-4">
+                                                        <div className="overflow-x-auto">
+                                                          <table className="w-full border-collapse" style={{ minWidth: 360 }}>
+                                                            <thead>
+                                                              <tr>
+                                                                {["CPT", "Count", "Patients", "wRVU"].map((h, i) => (
+                                                                  <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
+                                                                ))}
+                                                              </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                              {(periodDrilldown?.cpt_mix ?? []).slice(0, 20).map((cpt) => (
+                                                                <tr key={cpt.cpt} className="hover:bg-surface-soft">
+                                                                  <td className={`${TD} font-mono font-bold`}>{cpt.cpt}</td>
+                                                                  <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.count}</td>
+                                                                  <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.patients}</td>
+                                                                  <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{cpt.wrvu.toFixed(2)}</td>
+                                                                </tr>
+                                                              ))}
+                                                            </tbody>
+                                                          </table>
+                                                        </div>
+                                                        {dashboardGroupBy !== "day" && (periodDrilldown?.day_cpt_mix ?? []).length > 0 && (
+                                                          <div className="overflow-x-auto">
+                                                            <table className="w-full border-collapse" style={{ minWidth: 360 }}>
+                                                              <thead>
+                                                                <tr>
+                                                                  {["Day", "Top CPT", "Count", "wRVU"].map((h, i) => (
+                                                                    <th key={h} className={`${TH} ${i >= 2 ? "text-right" : "text-left"}`}>{h}</th>
+                                                                  ))}
+                                                                </tr>
+                                                              </thead>
+                                                              <tbody>
+                                                                {(periodDrilldown?.day_cpt_mix ?? []).map((dayMix) => {
+                                                                  const top = dayMix.cpt_mix[0];
+                                                                  return (
+                                                                    <tr key={dayMix.day} className="hover:bg-surface-soft">
+                                                                      <td className={`${TD} font-semibold whitespace-nowrap`}>{dayMix.day_label}</td>
+                                                                      <td className={`${TD} font-mono font-bold`}>{top?.cpt ?? "—"}</td>
+                                                                      <td className={`${TD} text-right font-mono tabular-nums`}>{top?.count ?? 0}</td>
+                                                                      <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{(top?.wrvu ?? 0).toFixed(2)}</td>
+                                                                    </tr>
+                                                                  );
+                                                                })}
+                                                              </tbody>
+                                                            </table>
+                                                          </div>
+                                                        )}
+                                                      </div>
+                                                    </div>
+                                                  </td>
+                                                </tr>
+                                              ),
+                                            ];
+                                          })}
                                         </tbody>
                                       </table>
                                     </div>

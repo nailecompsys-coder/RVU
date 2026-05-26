@@ -70,6 +70,17 @@ export const api = {
   },
   portalDashboard: (range = "month", groupBy = "week") =>
     json<PortalDashboardResponse>(`/api/v1/portal/rvu/dashboard?range=${encodeURIComponent(range)}&group_by=${encodeURIComponent(groupBy)}`),
+  portalDashboardDrilldown: (params: { range?: string; groupBy?: string; providerId?: number; periodKey?: string; day?: string; limit?: number }) => {
+    const qs = new URLSearchParams({
+      range: params.range ?? "month",
+      group_by: params.groupBy ?? "week",
+      limit: String(params.limit ?? 250),
+    });
+    if (params.providerId != null) qs.set("provider_id", String(params.providerId));
+    if (params.periodKey) qs.set("period_key", params.periodKey);
+    if (params.day) qs.set("day", params.day);
+    return json<PortalDashboardDrilldownResponse>(`/api/v1/portal/rvu/dashboard/drilldown?${qs.toString()}`);
+  },
   portalScanDetail: (id: number) =>
     json<PortalScanRow>(`/api/v1/portal/rvu/scans/${id}`),
   portalScanAiRuns: (id: number) =>
@@ -413,6 +424,25 @@ export type PortalDashboardResponse = {
   periods: PortalDashboardPeriod[];
   provider_periods: PortalDashboardProviderPeriod[];
   cpt_mix: PortalDashboardCpt[];
+};
+
+export type PortalDashboardDayCptMix = {
+  day: string;
+  day_label: string;
+  cpt_mix: PortalDashboardCpt[];
+};
+
+export type PortalDashboardDrilldownResponse = {
+  range: { key: string; start: string; end: string; group_by: string };
+  provider_id: number | null;
+  period_key: string | null;
+  period_label: string | null;
+  metrics: PortalDashboardMetric;
+  scans: PortalScanRow[];
+  cpt_mix: PortalDashboardCpt[];
+  day_cpt_mix: PortalDashboardDayCptMix[];
+  limit: number;
+  has_more: boolean;
 };
 
 export type PortalScanAiRun = {

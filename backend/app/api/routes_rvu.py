@@ -2192,10 +2192,10 @@ def _scan_list_dict(s: RvuScan, surgeon: "RvuStaff | None" = None, has_image: bo
 
 
 def _portal_scan_list_row_dict(row) -> dict:
+    line_items = _parse_line_items(getattr(row, "line_items", None))
+    fin = _scan_financial_summary(row, line_items)
     total_rvu = round(float(row.total_rvu or 0.0), 2)
     total_payment = round(float(row.total_payment or 0.0), 2)
-    cf = float(row.cf or 32.3465)
-    surgeon_value = round(total_rvu * cf, 2)
     return {
         "id": row.id,
         "scanned_at": _iso_utc(row.scanned_at),
@@ -2228,11 +2228,11 @@ def _portal_scan_list_row_dict(row) -> dict:
             mrn=row.mrn,
             service_date=row.service_date,
         ),
-        "cpt_count": 1 if row.main_cpt else 0,
-        "work_rvu": total_rvu,
-        "surgeon_value": surgeon_value,
-        "facility_share": round(total_payment - surgeon_value, 2),
-        "assist_count": 0,
+        "cpt_count": fin["cpt_count"],
+        "work_rvu": fin["work_rvu"],
+        "surgeon_value": fin["surgeon_value"],
+        "facility_share": fin["facility_share"],
+        "assist_count": fin["assist_count"],
     }
 
 
@@ -2341,6 +2341,41 @@ def _add_scan_to_bucket(bucket: dict, row, lines: list[dict], scan_day: date) ->
     bucket["cpt_lines"] += len(lines)
     bucket["wrvu"] += sum(float(line.get("work_rvu") or line.get("total_rvu") or 0.0) for line in lines)
     bucket["est_payment"] += float(row.total_payment or 0.0)
+
+
+def _portal_scan_day(row, fallback: date) -> date:
+    return row.service_date or (row.scanned_at.date() if row.scanned_at else fallback)
+
+
+def _add_line_to_cpt_mix(target: dict[str, dict], *, line: dict, row, provider_id: int) -> None:
+    cpt = str(line.get("cpt") or line.get("code") or row.main_cpt or "Unknown").strip() or "Unknown"
+    mrn = str(row.mrn or "").strip()
+    patient_key = mrn or f"scan:{row.id}"
+    entry = target.setdefault(
+        cpt,
+        {"cpt": cpt, "count": 0, "patients": set(), "wrvu": 0.0, "est_payment": 0.0, "providers": set()},
+    )
+    entry["count"] += 1
+    entry["patients"].add(patient_key)
+    entry["wrvu"] += float(line.get("work_rvu") or line.get("total_rvu") or 0.0)
+    entry["est_payment"] += float(line.get("payment") or 0.0)
+    entry["providers"].add(provider_id)
+
+
+def _cpt_mix_payload(cpt_mix: dict[str, dict], *, limit: int = 200) -> list[dict]:
+    rows = [
+        {
+            "cpt": entry["cpt"],
+            "count": int(entry["count"]),
+            "patients": len(entry["patients"]),
+            "wrvu": round(float(entry["wrvu"]), 2),
+            "est_payment": round(float(entry["est_payment"]), 2),
+            "providers": len(entry["providers"]),
+        }
+        for entry in cpt_mix.values()
+    ]
+    rows.sort(key=lambda item: (-float(item["wrvu"]), -int(item["count"]), str(item["cpt"])))
+    return rows[:limit]
 
 
 @router.get("/history")
@@ -3354,7 +3389,7 @@ def portal_dashboard(
     cpt_mix: dict[str, dict] = {}
 
     for row in scan_rows:
-        scan_day = row.service_date or (row.scanned_at.date() if row.scanned_at else start_date)
+        scan_day = _portal_scan_day(row, start_date)
         period_key, period_label = _portal_period_key(scan_day, group_by)
         lines = _scan_lines_for_dashboard(row)
         provider = provider_map.get(row.surgeon_id)
@@ -3434,18 +3469,7 @@ def portal_dashboard(
         })
     provider_period_rows.sort(key=lambda item: (item["provider_name"], item["period_key"]))
 
-    cpt_rows = [
-        {
-            "cpt": entry["cpt"],
-            "count": int(entry["count"]),
-            "patients": len(entry["patients"]),
-            "wrvu": round(float(entry["wrvu"]), 2),
-            "est_payment": round(float(entry["est_payment"]), 2),
-            "providers": len(entry["providers"]),
-        }
-        for entry in cpt_mix.values()
-    ]
-    cpt_rows.sort(key=lambda item: (-float(item["wrvu"]), item["cpt"]))
+    cpt_rows = _cpt_mix_payload(cpt_mix, limit=50)
 
     practice_metrics = _metric_payload(practice)
     practice_metrics["inactive_scanners"] = sum(1 for row in provider_rows if row["is_active"] and row["scans"] == 0)
@@ -3456,7 +3480,109 @@ def portal_dashboard(
         "providers": provider_rows,
         "periods": period_rows,
         "provider_periods": provider_period_rows,
-        "cpt_mix": cpt_rows[:50],
+        "cpt_mix": cpt_rows,
+    }
+
+
+@portal_router.get("/dashboard/drilldown")
+def portal_dashboard_drilldown(
+    db: Session = Depends(get_db),
+    _admin=Depends(get_current_admin_api),
+    range: str = "month",
+    group_by: str = "week",
+    start: str | None = None,
+    end: str | None = None,
+    provider_id: int | None = None,
+    period_key: str | None = None,
+    day: str | None = None,
+    limit: int = 250,
+):
+    if group_by not in {"day", "week", "month", "quarter"}:
+        raise HTTPException(status_code=400, detail="Invalid group_by")
+    start_date, end_date, range_key = _portal_dashboard_period_bounds(range, start, end)
+    if day:
+        target_day = payment_svc.parse_service_date(day)
+        if not target_day:
+            raise HTTPException(status_code=400, detail="Invalid day")
+        start_date = target_day
+        end_date = target_day
+    limit = min(max(limit, 1), 500)
+
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    scan_day_expr = func.date(RvuScan.scanned_at)
+    query = (
+        db.query(RvuScan, RvuStaff)
+        .outerjoin(RvuStaff, RvuStaff.id == RvuScan.surgeon_id)
+        .filter(
+            or_(
+                RvuScan.service_date.between(start_date, end_date),
+                (RvuScan.service_date.is_(None) & scan_day_expr.between(start_iso, end_iso)),
+            )
+        )
+        .filter(RvuScan.scan_status != "pending_processing")
+        .order_by(desc(RvuScan.scanned_at))
+    )
+    if provider_id is not None:
+        query = query.filter(RvuScan.surgeon_id == provider_id)
+
+    rows = query.limit(1000).all()
+    practice = _empty_metric_bucket()
+    cpt_mix: dict[str, dict] = {}
+    day_cpt_mix: dict[str, dict[str, dict]] = {}
+    selected_scans: list[tuple[RvuScan, RvuStaff | None, date, list[dict]]] = []
+
+    for scan, staff in rows:
+        scan_day = _portal_scan_day(scan, start_date)
+        computed_period_key, period_label = _portal_period_key(scan_day, group_by)
+        if period_key and computed_period_key != period_key:
+            continue
+        lines = _scan_lines_for_dashboard(scan)
+        _add_scan_to_bucket(practice, scan, lines, scan_day)
+        provider_key = int(scan.surgeon_id)
+        day_key = scan_day.isoformat()
+        day_bucket = day_cpt_mix.setdefault(day_key, {})
+        for line in lines:
+            _add_line_to_cpt_mix(cpt_mix, line=line, row=scan, provider_id=provider_key)
+            _add_line_to_cpt_mix(day_bucket, line=line, row=scan, provider_id=provider_key)
+        selected_scans.append((scan, staff, scan_day, lines))
+        if len(selected_scans) >= limit:
+            break
+
+    scan_payload = []
+    for scan, staff, scan_day, lines in selected_scans:
+        item = _scan_history_dict(scan, staff)
+        item["surgeon_id"] = scan.surgeon_id
+        item["period_key"], item["period_label"] = _portal_period_key(scan_day, group_by)
+        item["scan_day"] = scan_day.isoformat()
+        item["cpt_count"] = len(lines)
+        scan_payload.append(item)
+
+    day_rows = [
+        {
+            "day": day_key,
+            "day_label": datetime.strptime(day_key, "%Y-%m-%d").strftime("%b %-d"),
+            "cpt_mix": _cpt_mix_payload(mix, limit=100),
+        }
+        for day_key, mix in day_cpt_mix.items()
+    ]
+    day_rows.sort(key=lambda item: item["day"], reverse=True)
+
+    label = None
+    if period_key and selected_scans:
+        label = _portal_period_key(selected_scans[0][2], group_by)[1]
+
+    return {
+        "range": {"key": range_key, "start": start_iso, "end": end_iso, "group_by": group_by},
+        "provider_id": provider_id,
+        "period_key": period_key,
+        "period_label": label,
+        "metrics": _metric_payload(practice),
+        "scans": scan_payload,
+        "cpt_mix": _cpt_mix_payload(cpt_mix, limit=200),
+        "day_cpt_mix": day_rows,
+        "limit": limit,
+        "has_more": len(rows) > len(selected_scans),
     }
 
 
@@ -3495,6 +3621,7 @@ def portal_all_scans(
             RvuScan.scan_status,
             RvuScan.main_cpt,
             RvuScan.main_cpt_status,
+            RvuScan.line_items,
             RvuScan.surgeon_id,
             RvuScan.elapsed_secs,
             RvuScan.review_reason,
