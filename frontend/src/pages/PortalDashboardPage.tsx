@@ -843,7 +843,7 @@ export default function PortalDashboardPage() {
                                               periodSelected && (
                                                 <tr key={`${period.provider_id}-${period.period_key}-drill`} className="bg-surface">
                                                   <td colSpan={6} className="p-0 border-b border-brand-border">
-                                                    <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(360px,0.8fr)]">
+                                                    <div className="p-4">
                                                       <div className="overflow-x-auto">
                                                         <table className="w-full border-collapse" style={{ minWidth: 900 }}>
                                                           <thead>
@@ -890,55 +890,6 @@ export default function PortalDashboardPage() {
                                                             })}
                                                           </tbody>
                                                         </table>
-                                                      </div>
-                                                      <div className="grid gap-4">
-                                                        <div className="overflow-x-auto">
-                                                          <table className="w-full border-collapse" style={{ minWidth: 360 }}>
-                                                            <thead>
-                                                              <tr>
-                                                                {["CPT", "Count", "Patients", "wRVU"].map((h, i) => (
-                                                                  <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
-                                                                ))}
-                                                              </tr>
-                                                            </thead>
-                                                            <tbody>
-                                                              {(periodDrilldown?.cpt_mix ?? []).slice(0, 20).map((cpt) => (
-                                                                <tr key={cpt.cpt} className="hover:bg-surface-soft">
-                                                                  <td className={`${TD} font-mono font-bold`}>{cpt.cpt}</td>
-                                                                  <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.count}</td>
-                                                                  <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.patients}</td>
-                                                                  <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{cpt.wrvu.toFixed(2)}</td>
-                                                                </tr>
-                                                              ))}
-                                                            </tbody>
-                                                          </table>
-                                                        </div>
-                                                        {dashboardGroupBy !== "day" && (periodDrilldown?.day_cpt_mix ?? []).length > 0 && (
-                                                          <div className="overflow-x-auto">
-                                                            <table className="w-full border-collapse" style={{ minWidth: 360 }}>
-                                                              <thead>
-                                                                <tr>
-                                                                  {["Day", "Top CPT", "Count", "wRVU"].map((h, i) => (
-                                                                    <th key={h} className={`${TH} ${i >= 2 ? "text-right" : "text-left"}`}>{h}</th>
-                                                                  ))}
-                                                                </tr>
-                                                              </thead>
-                                                              <tbody>
-                                                                {(periodDrilldown?.day_cpt_mix ?? []).map((dayMix) => {
-                                                                  const top = dayMix.cpt_mix[0];
-                                                                  return (
-                                                                    <tr key={dayMix.day} className="hover:bg-surface-soft">
-                                                                      <td className={`${TD} font-semibold whitespace-nowrap`}>{dayMix.day_label}</td>
-                                                                      <td className={`${TD} font-mono font-bold`}>{top?.cpt ?? "—"}</td>
-                                                                      <td className={`${TD} text-right font-mono tabular-nums`}>{top?.count ?? 0}</td>
-                                                                      <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{(top?.wrvu ?? 0).toFixed(2)}</td>
-                                                                    </tr>
-                                                                  );
-                                                                })}
-                                                              </tbody>
-                                                            </table>
-                                                          </div>
-                                                        )}
                                                       </div>
                                                     </div>
                                                   </td>
