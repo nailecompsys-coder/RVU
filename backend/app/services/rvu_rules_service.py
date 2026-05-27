@@ -85,7 +85,13 @@ def _catalog_status(entry: dict[str, Any]) -> str:
 def get_effective_modifier_rules(db: Session) -> dict[str, dict[str, object]]:
     overrides = _load_rule_config(db, MODIFIER_RULE_CONFIG_ID)
     rules: dict[str, dict[str, object]] = {
-        code: {"code": code, "factor": factor, "desc": DEFAULT_MODIFIER_DESC.get(code, code)}
+        code: {
+            "code": code,
+            "factor": factor,
+            "desc": DEFAULT_MODIFIER_DESC.get(code, code),
+            "source": "default",
+            "needs_review": False,
+        }
         for code, factor in DEFAULT_MODIFIER_FACTORS.items()
     }
     for code, raw in overrides.items():
@@ -101,6 +107,13 @@ def get_effective_modifier_rules(db: Session) -> dict[str, dict[str, object]]:
             rule["factor"] = factor
         if desc:
             rule["desc"] = desc
+        for field in ("source", "added_by_staff_id", "added_by_staff_name", "added_at"):
+            if raw.get(field) not in (None, ""):
+                rule[field] = raw.get(field)
+        if raw.get("needs_review") is not None:
+            rule["needs_review"] = bool(raw.get("needs_review"))
+        elif key not in DEFAULT_MODIFIER_FACTORS:
+            rule["needs_review"] = True
         rules[key] = rule
     return rules
 
@@ -116,6 +129,11 @@ def patch_modifier_rule(
     *,
     factor: float | None = None,
     desc: str | None = None,
+    source: str | None = None,
+    needs_review: bool | None = None,
+    added_by_staff_id: int | None = None,
+    added_by_staff_name: str | None = None,
+    added_at: str | None = None,
 ) -> dict[str, object]:
     key = str(code or "").strip().upper()
     if not key:
@@ -128,6 +146,16 @@ def patch_modifier_rule(
         current["factor"] = round(float(factor), 4)
     if desc is not None:
         current["desc"] = desc.strip()
+    if source is not None:
+        current["source"] = source.strip() or "portal"
+    if needs_review is not None:
+        current["needs_review"] = bool(needs_review)
+    if added_by_staff_id is not None and current.get("added_by_staff_id") is None:
+        current["added_by_staff_id"] = int(added_by_staff_id)
+    if added_by_staff_name and not current.get("added_by_staff_name"):
+        current["added_by_staff_name"] = added_by_staff_name.strip()
+    if added_at and not current.get("added_at"):
+        current["added_at"] = added_at
     overrides[key] = current
     _save_rule_config(db, MODIFIER_RULE_CONFIG_ID, overrides)
     return get_effective_modifier_rules(db)[key]

@@ -137,6 +137,12 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  portalModifierRules: () => json<{ modifiers: ModifierRule[] }>("/api/v1/portal/rvu/modifier-rules"),
+  patchPortalModifierRule: (code: string, body: { desc?: string; factor?: number; needs_review?: boolean }) =>
+    json<ModifierRule>(`/api/v1/portal/rvu/modifier-rules/${encodeURIComponent(code)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   deletePortalOpNote: async (id: number) => {
     const r = await fetch(`/api/v1/portal/rvu/op-notes/${id}`, {
       method: "DELETE",
@@ -276,6 +282,17 @@ export type StaffMe = {
 };
 
 export type PortalMe = { id: number; username: string; email: string; role: string };
+
+export type ModifierRule = {
+  code: string;
+  desc: string;
+  factor: number;
+  source?: string;
+  needs_review?: boolean;
+  added_by_staff_id?: number;
+  added_by_staff_name?: string;
+  added_at?: string;
+};
 
 export type PortalUserRecord = {
   id: number;

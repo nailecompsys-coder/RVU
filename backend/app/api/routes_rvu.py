@@ -3074,6 +3074,8 @@ class StaffCptRulePatch(BaseModel):
 class StaffModifierRulePatch(BaseModel):
     factor: float | None = None
     desc: str | None = None
+    source: str | None = None
+    needs_review: bool | None = None
 
 
 @router.get("/cpt-library")
@@ -3117,10 +3119,25 @@ def staff_patch_modifier_library(
     code: str,
     body: StaffModifierRulePatch,
     db: Session = Depends(get_db),
-    _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
+    staff, _ = auth
+    staff_name = " ".join(
+        part for part in (getattr(staff, "first_name", ""), getattr(staff, "last_name", ""))
+        if part
+    ).strip()
     try:
-        return patch_modifier_rule(db, code, factor=body.factor, desc=body.desc)
+        return patch_modifier_rule(
+            db,
+            code,
+            factor=body.factor,
+            desc=body.desc,
+            source=body.source,
+            needs_review=body.needs_review,
+            added_by_staff_id=getattr(staff, "id", None),
+            added_by_staff_name=staff_name or getattr(staff, "email", None),
+            added_at=datetime.now(timezone.utc).isoformat(),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -3269,6 +3286,7 @@ class PortalCptRulePatch(BaseModel):
 class PortalModifierRulePatch(BaseModel):
     factor: float | None = None
     desc: str | None = None
+    needs_review: bool | None = None
 
 
 @portal_router.get("/cpt-rules")
@@ -3318,7 +3336,7 @@ def portal_patch_modifier_rule_endpoint(
     _admin=Depends(get_current_admin_api),
 ):
     try:
-        return patch_modifier_rule(db, code, factor=body.factor, desc=body.desc)
+        return patch_modifier_rule(db, code, factor=body.factor, desc=body.desc, source="portal", needs_review=body.needs_review)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

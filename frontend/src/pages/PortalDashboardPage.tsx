@@ -7,6 +7,7 @@ import {
   type PortalDashboardDrilldownResponse,
   type PortalDashboardResponse,
   type PortalDashboardProvider,
+  type ModifierRule,
   type PortalScanAiRun,
   type PortalScanRow,
   type ScanPatchBody,
@@ -332,9 +333,30 @@ export default function PortalDashboardPage() {
   const [devAnthropicKey, setDevAnthropicKey] = useState("");
   const [devSaving, setDevSaving] = useState(false);
   const [devErr, setDevErr] = useState<string | null>(null);
+  const [modifiers, setModifiers] = useState<ModifierRule[]>([]);
+  const [modifiersLoaded, setModifiersLoaded] = useState(false);
+  const [modifierSavingCode, setModifierSavingCode] = useState<string | null>(null);
   const defaultModelForProvider = (p: string) =>
     p === "openai" ? "gpt-4o-mini" : p === "anthropic" ? "claude-3-5-sonnet-latest" : p === "paddle" ? "paddleocr" : "qwen2.5vl:7b";
   const todayKey = useMemo(() => etDateKey(new Date().toISOString()), []);
+  const pendingModifierRules = useMemo(
+    () => modifiers.filter((rule) => rule.needs_review || rule.source === "mobile"),
+    [modifiers],
+  );
+
+  const clearModifierReview = async (rule: ModifierRule) => {
+    setModifierSavingCode(rule.code);
+    try {
+      const updated = await api.patchPortalModifierRule(rule.code, {
+        desc: rule.desc,
+        factor: rule.factor,
+        needs_review: false,
+      });
+      setModifiers((prev) => prev.map((item) => (item.code === updated.code ? updated : item)));
+    } finally {
+      setModifierSavingCode(null);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -393,7 +415,15 @@ export default function PortalDashboardPage() {
         })
         .catch(() => {});
     }
-  }, [admin, tab, staffLoaded, devicesLoaded]);
+    if (tab === "settings" && !modifiersLoaded) {
+      void api.portalModifierRules()
+        .then((res) => {
+          setModifiers(res.modifiers);
+          setModifiersLoaded(true);
+        })
+        .catch(() => {});
+    }
+  }, [admin, tab, staffLoaded, devicesLoaded, modifiersLoaded]);
 
   useEffect(() => {
     if (!admin || admin.role !== "superadmin") return;
@@ -1311,6 +1341,67 @@ export default function PortalDashboardPage() {
             <h2 className="text-lg font-bold text-ink mb-1">Settings</h2>
             <p className="text-sm text-ink-secondary mb-6">Portal accounts for office staff (username and password).</p>
             <PortalUsersPanel admin={admin} />
+            <div className="card mt-6 p-5">
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <h3 className="text-sm font-black text-ink uppercase tracking-wide">Mobile-added modifiers</h3>
+                  <p className="text-xs text-ink-secondary mt-1">
+                    Modifiers added from the iPhone appear here for admin review. They are already available to the picker wheel.
+                  </p>
+                </div>
+                <button
+                  className="btn-secondary text-xs px-3 py-2"
+                  onClick={() => {
+                    setModifiersLoaded(false);
+                    void api.portalModifierRules().then((res) => {
+                      setModifiers(res.modifiers);
+                      setModifiersLoaded(true);
+                    });
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
+              {!modifiersLoaded ? (
+                <p className="text-sm text-ink-secondary">Loading modifier review...</p>
+              ) : pendingModifierRules.length === 0 ? (
+                <p className="text-sm text-ink-secondary">No mobile-added modifiers need review.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse" style={{ minWidth: 720 }}>
+                    <thead>
+                      <tr className="bg-surface-soft text-left">
+                        {["Code", "Description", "Factor", "Added by", "Status", ""].map((h) => (
+                          <th key={h} className="px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pendingModifierRules.map((rule) => (
+                        <tr key={rule.code} className="border-t border-border">
+                          <td className="px-3 py-3 font-mono font-black text-ink">{rule.code}</td>
+                          <td className="px-3 py-3 text-sm text-ink">{rule.desc || "No description"}</td>
+                          <td className="px-3 py-3 text-sm font-mono">{Number(rule.factor ?? 1).toFixed(2)}x</td>
+                          <td className="px-3 py-3 text-sm text-ink-secondary">{rule.added_by_staff_name || "Mobile user"}</td>
+                          <td className="px-3 py-3">
+                            <span className="badge-yellow">Needs review</span>
+                          </td>
+                          <td className="px-3 py-3 text-right">
+                            <button
+                              className="btn-secondary text-xs px-3 py-2"
+                              disabled={modifierSavingCode === rule.code}
+                              onClick={() => void clearModifierReview(rule)}
+                            >
+                              {modifierSavingCode === rule.code ? "Saving..." : "Mark reviewed"}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
             {admin.role === "superadmin" && (
               <div className="card mt-6 p-5 border-2 border-brand-blue/25">
                 <p className="label text-brand-blue mb-2">Developer AI engine (you only)</p>

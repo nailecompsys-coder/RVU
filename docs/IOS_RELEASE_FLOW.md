@@ -33,17 +33,32 @@ This runbook standardizes local iOS validation and TestFlight release against th
 
 1. Switch app config to production API base URL.
 2. Increment build/version metadata.
-3. Product -> Archive in Xcode.
-4. Validate archive in Organizer.
-5. Upload to App Store Connect.
-6. Assign to internal testers in TestFlight.
-7. Confirm smoke tests against production backend.
+3. Write a `BETA FIX` tester summary with every fixed, added, and changed item.
+4. Product -> Archive in Xcode.
+5. Validate archive in Organizer.
+6. Upload to App Store Connect.
+7. Assign to internal testers in TestFlight.
+8. Confirm smoke tests against production backend.
+
+## BETA FIX Summary
+
+Every TestFlight build must include a plain-language `BETA FIX` list before upload. This is the message Donna can text to testers.
+
+Include:
+- Fixes
+- Added features
+- Changed behavior
+- Backend/API changes affecting the app
+- Known issues still under watch
+
+Do not upload a TestFlight build without this list.
 
 ## Release readiness gates
 
 - [ ] Backend deploy runbook complete (`docs/DEPLOY_RUNBOOK.md`)
 - [ ] Backend health and TLS checks pass
 - [ ] iOS simulator matrix completed
+- [ ] `BETA FIX` tester summary written
 - [ ] TestFlight upload processed successfully
 - [ ] Internal tester confirmation received
 
