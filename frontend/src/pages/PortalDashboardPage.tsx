@@ -206,6 +206,25 @@ function etDateKey(value: string | null | undefined): string {
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
+function weekEndingLabel(periodKey: string, fallback: string): string {
+  const match = periodKey.match(/^(\d{4})-W(\d{2})$/);
+  if (!match) return fallback;
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Day = jan4.getUTCDay() || 7;
+  const weekOneMonday = new Date(jan4);
+  weekOneMonday.setUTCDate(jan4.getUTCDate() - jan4Day + 1);
+  const weekEnd = new Date(weekOneMonday);
+  weekEnd.setUTCDate(weekOneMonday.getUTCDate() + (week - 1) * 7 + 6);
+  return weekEnd.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    month: "2-digit",
+    day: "2-digit",
+    year: "2-digit",
+  });
+}
+
 // ── Inline edit row ────────────────────────────────────────────────────────────
 interface EditRowProps {
   scan: PortalScanRow;
@@ -488,6 +507,11 @@ export default function PortalDashboardPage() {
     return () => { cancelled = true; };
   }, [admin, dashboardRange, dashboardGroupBy, selectedProviderId, selectedProviderPeriodKey]);
 
+  useEffect(() => {
+    if (selectedProviderId === null || selectedProviderPeriodKey || selectedProviderPeriods.length === 0) return;
+    setSelectedProviderPeriodKey(selectedProviderPeriods[0].period_key);
+  }, [selectedProviderId, selectedProviderPeriodKey, selectedProviderPeriods]);
+
   const logout = async () => {
     await api.portalLogout();
     nav("/portal/login");
@@ -538,6 +562,7 @@ export default function PortalDashboardPage() {
       try {
         const updated = await api.patchScan(id, editDraft);
         setScans((prev) => prev.map((s) => (s.id === id ? { ...s, ...updated } : s)));
+        setPeriodDrilldown((prev) => prev ? { ...prev, scans: prev.scans.map((s) => (s.id === id ? { ...s, ...updated } : s)) } : prev);
       setEditId(null); setEditMode("edit"); setEditDraft({});
     } catch (e: unknown) {
       alert("Save failed: " + (e instanceof Error ? e.message : "unknown error"));
@@ -549,6 +574,7 @@ export default function PortalDashboardPage() {
     try {
       await api.deleteScan(id);
       setScans((prev) => prev.filter((s) => s.id !== id));
+      setPeriodDrilldown((prev) => prev ? { ...prev, scans: prev.scans.filter((s) => s.id !== id) } : prev);
       setDeleteConfirmId(null);
     } catch (e: unknown) {
       alert("Delete failed: " + (e instanceof Error ? e.message : "unknown error"));
@@ -625,6 +651,45 @@ export default function PortalDashboardPage() {
       .slice()
       .sort((a, b) => b.period_key.localeCompare(a.period_key));
   }, [dashboard, selectedProviderId]);
+
+  const selectedProvider = useMemo(() => {
+    if (!dashboard || selectedProviderId === null) return null;
+    return dashboard.providers.find((provider) => provider.provider_id === selectedProviderId) ?? null;
+  }, [dashboard, selectedProviderId]);
+
+  const selectedProviderPeriod = useMemo(
+    () => selectedProviderPeriods.find((period) => period.period_key === selectedProviderPeriodKey) ?? selectedProviderPeriods[0] ?? null,
+    [selectedProviderPeriods, selectedProviderPeriodKey],
+  );
+
+  const openProviderDashboard = (provider: PortalDashboardProvider) => {
+    if (!dashboard) return;
+    if (dashboardGroupBy !== "week") {
+      setDashboardGroupBy("week");
+      setSelectedProviderId(provider.provider_id);
+      setSelectedProviderPeriodKey(null);
+      setPeriodDrilldown(null);
+      return;
+    }
+    const periods = dashboard.provider_periods
+      .filter((period) => period.provider_id === provider.provider_id)
+      .slice()
+      .sort((a, b) => b.period_key.localeCompare(a.period_key));
+    setSelectedProviderId(provider.provider_id);
+    setSelectedProviderPeriodKey(periods[0]?.period_key ?? null);
+    setPeriodDrilldown(null);
+  };
+
+  const closeProviderDashboard = () => {
+    setSelectedProviderId(null);
+    setSelectedProviderPeriodKey(null);
+    setPeriodDrilldown(null);
+    setPeriodDrilldownErr(null);
+    setEditId(null);
+    setEditMode("edit");
+    setEditDraft({});
+    setDeleteConfirmId(null);
+  };
 
   const startStaffEdit = (s: StaffMember) => {
     setShowAddForm(false); setStaffEditId(s.id);
@@ -817,17 +882,11 @@ export default function PortalDashboardPage() {
                               );
                             }
                             const { provider } = row;
-                            const selected = selectedProviderId === provider.provider_id;
-                            return [
+                            return (
                               <tr
                                 key={row.key}
-                                onClick={() => {
-                                  const nextProviderId = selected ? null : provider.provider_id;
-                                  setSelectedProviderId(nextProviderId);
-                                  setSelectedProviderPeriodKey(null);
-                                  setPeriodDrilldown(null);
-                                }}
-                                className={`cursor-pointer transition-colors ${selected ? "bg-brand-muted/70" : "hover:bg-surface-soft"}`}
+                                onClick={() => openProviderDashboard(provider)}
+                                className="cursor-pointer transition-colors hover:bg-surface-soft"
                               >
                                 <td className={`${TD} font-bold`}>{provider.provider_name}</td>
                                 <td className={TD}>{provider.role ? <span className="badge-blue">{staffRoleLabel(provider.role)}</span> : "—"}</td>
@@ -838,102 +897,8 @@ export default function PortalDashboardPage() {
                                 <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(provider.est_payment)}</td>
                                 <td className={`${TD} text-right font-mono tabular-nums`}>{provider.avg_wrvu_per_patient.toFixed(2)}</td>
                                 <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{provider.last_scan ? fmtDateTimeEt(provider.last_scan) : "—"}</td>
-                              </tr>,
-                              selected && (
-                                <tr key={`${row.key}-detail`} className="bg-brand-muted/30">
-                                  <td colSpan={9} className="p-0 border-b border-brand-border">
-                                    <div className="overflow-x-auto px-4 py-3">
-                                      <table className="w-full border-collapse" style={{ minWidth: 620 }}>
-                                        <thead>
-                                          <tr>
-                                            {["Period", "Patients", "Scans", "CPTs", "wRVU", "Est. $"].map((h, i) => (
-                                              <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
-                                            ))}
-                                          </tr>
-                                        </thead>
-                                        <tbody>
-                                          {selectedProviderPeriods.length === 0 && (
-                                            <tr><td colSpan={6} className="px-4 py-5 text-center text-ink-secondary text-sm">No scans in range.</td></tr>
-                                          )}
-                                          {selectedProviderPeriods.map((period) => {
-                                            const periodSelected = selectedProviderPeriodKey === period.period_key;
-                                            return [
-                                              <tr
-                                                key={`${period.provider_id}-${period.period_key}`}
-                                                onClick={() => setSelectedProviderPeriodKey(periodSelected ? null : period.period_key)}
-                                                className={`cursor-pointer ${periodSelected ? "bg-brand-muted/70" : "bg-surface hover:bg-surface-soft"}`}
-                                              >
-                                                <td className={`${TD} font-semibold`}>{period.period_label}</td>
-                                                <td className={`${TD} text-right font-mono tabular-nums`}>{period.patients}</td>
-                                                <td className={`${TD} text-right font-mono tabular-nums`}>{period.scans}</td>
-                                                <td className={`${TD} text-right font-mono tabular-nums`}>{period.cpt_lines}</td>
-                                                <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{period.wrvu.toFixed(2)}</td>
-                                                <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(period.est_payment)}</td>
-                                              </tr>,
-                                              periodSelected && (
-                                                <tr key={`${period.provider_id}-${period.period_key}-drill`} className="bg-surface">
-                                                  <td colSpan={6} className="p-0 border-b border-brand-border">
-                                                    <div className="p-4">
-                                                      <div className="overflow-x-auto">
-                                                        <table className="w-full border-collapse" style={{ minWidth: 900 }}>
-                                                          <thead>
-                                                            <tr>
-                                                              {["Scanned", "DOS", "MRN", "Patient", "CPTs", "wRVU", "Payment", "OCR", ""].map((h, i) => (
-                                                                <th key={h} className={`${TH} ${i >= 5 && i <= 6 ? "text-right" : "text-left"}`}>{h}</th>
-                                                              ))}
-                                                            </tr>
-                                                          </thead>
-                                                          <tbody>
-                                                            {periodDrilldownLoading && (
-                                                              <tr><td colSpan={9} className="px-4 py-5 text-sm text-ink-secondary"><span className="inline-flex items-center gap-2"><Spinner /> Loading...</span></td></tr>
-                                                            )}
-                                                            {periodDrilldownErr && (
-                                                              <tr><td colSpan={9} className="px-4 py-5 text-sm text-red-600">{periodDrilldownErr}</td></tr>
-                                                            )}
-                                                            {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.length === 0 && (
-                                                              <tr><td colSpan={9} className="px-4 py-5 text-sm text-ink-secondary">No entries.</td></tr>
-                                                            )}
-                                                            {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.map((scan) => {
-                                                              const fin = listFinancialSummary(scan);
-                                                              return (
-                                                                <tr key={scan.id} className="hover:bg-surface-soft">
-                                                                  <td className={`${TD} text-xs whitespace-nowrap`}>{fmtDateTimeEt(scan.scanned_at)}</td>
-                                                                  <td className={`${TD} text-xs whitespace-nowrap`}>{fmtCalendarDateMdY(scan.service_date)}</td>
-                                                                  <td className={`${TD} font-mono text-xs`}>{scan.mrn || "—"}</td>
-                                                                  <td className={`${TD} text-xs`}>{scan.patient_name || "—"}</td>
-                                                                  <td className={`${TD} text-right font-mono tabular-nums`}>{fin.cptCount}</td>
-                                                                  <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{(scan.total_rvu ?? 0).toFixed(2)}</td>
-                                                                  <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(scan.total_payment ?? 0)}</td>
-                                                                  <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{scan.ocr_elapsed_label || "—"}</td>
-                                                                  <td className={`${TD} text-right`}>
-                                                                    <button
-                                                                      type="button"
-                                                                      onClick={() => void openScanDetails(scan.id)}
-                                                                      disabled={detailLoadingId === scan.id}
-                                                                      className="text-ink text-xs font-semibold border border-brand-border rounded-lg px-2.5 py-1 hover:bg-surface-soft transition-colors disabled:opacity-60"
-                                                                    >
-                                                                      {detailLoadingId === scan.id ? <Spinner className="w-3 h-3" /> : "Details"}
-                                                                    </button>
-                                                                  </td>
-                                                                </tr>
-                                                              );
-                                                            })}
-                                                          </tbody>
-                                                        </table>
-                                                      </div>
-                                                    </div>
-                                                  </td>
-                                                </tr>
-                                              ),
-                                            ];
-                                          })}
-                                        </tbody>
-                                      </table>
-                                    </div>
-                                  </td>
-                                </tr>
-                              ),
-                            ];
+                              </tr>
+                            );
                           })}
                         </tbody>
                       </table>
@@ -941,37 +906,6 @@ export default function PortalDashboardPage() {
                   </div>
                 </div>
 
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <div className="card overflow-hidden">
-                    <div className="px-4 py-3 border-b border-brand-border">
-                      <h2 className="text-sm font-black text-ink uppercase tracking-wide">CPT Mix</h2>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full border-collapse" style={{ minWidth: 620 }}>
-                        <thead>
-                          <tr>
-                            {["CPT", "Count", "Patients", "Providers", "wRVU", "Est. $"].map((h, i) => (
-                              <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {dashboard.cpt_mix.slice(0, 12).map((cpt) => (
-                            <tr key={cpt.cpt} className="hover:bg-surface-soft">
-                              <td className={`${TD} font-mono font-bold`}>{cpt.cpt}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.count}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.patients}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.providers}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{cpt.wrvu.toFixed(2)}</td>
-                              <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(cpt.est_payment)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                </div>
               </div>
             )}
 
@@ -1555,6 +1489,176 @@ export default function PortalDashboardPage() {
           </main>
         </div>
       </div>
+
+      {selectedProvider && (
+        <div className="fixed inset-0 z-[190] bg-surface-soft flex flex-col">
+          <div className="h-14 bg-ink text-white px-4 sm:px-6 flex items-center gap-4 shrink-0">
+            <button onClick={closeProviderDashboard} className="btn-secondary text-xs px-3 py-1.5">Back</button>
+            <div className="min-w-0 flex-1">
+              <div className="text-base font-black truncate">{selectedProvider.provider_name}</div>
+              <div className="text-[11px] text-white/60 truncate">
+                {staffRoleLabel(selectedProvider.role)} · {selectedProvider.patients} patients · {selectedProvider.scans} scans · {selectedProvider.wrvu.toFixed(2)} wRVU · {fmt$(selectedProvider.est_payment)}
+              </div>
+            </div>
+            <span className="text-xs text-white/60 hidden md:block">
+              {dashboard && `${fmtCalendarDateMdY(dashboard.range.start)} - ${fmtCalendarDateMdY(dashboard.range.end)}`}
+            </span>
+          </div>
+
+          <div className="grid flex-1 min-h-0 gap-4 p-4 lg:grid-cols-[220px_minmax(0,1fr)_300px]">
+            <div className="card overflow-hidden min-h-0 flex flex-col">
+              <div className="px-3 py-2.5 border-b border-brand-border">
+                <h2 className="text-xs font-black uppercase tracking-wide text-ink">Weeks</h2>
+              </div>
+              <div className="overflow-auto">
+                <table className="w-full border-collapse">
+                  <tbody>
+                    {selectedProviderPeriods.length === 0 && (
+                      <tr><td className="px-3 py-4 text-sm text-ink-secondary">No weeks.</td></tr>
+                    )}
+                    {selectedProviderPeriods.map((period) => {
+                      const selected = period.period_key === selectedProviderPeriodKey;
+                      return (
+                        <tr
+                          key={period.period_key}
+                          onClick={() => setSelectedProviderPeriodKey(period.period_key)}
+                          className={`cursor-pointer border-b border-brand-border/60 ${selected ? "bg-brand-muted" : "hover:bg-surface-soft"}`}
+                        >
+                          <td className="px-3 py-2.5">
+                            <div className="text-sm font-black text-ink">{period.period_label}</div>
+                            <div className="text-[11px] text-ink-secondary">Ending {weekEndingLabel(period.period_key, period.period_label)}</div>
+                            <div className="mt-1 text-[11px] text-ink-secondary font-mono">{period.scans} scans · {period.wrvu.toFixed(2)} wRVU</div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="card overflow-hidden min-h-0 flex flex-col">
+              <div className="px-4 py-3 border-b border-brand-border flex items-center gap-3">
+                <h2 className="text-sm font-black uppercase tracking-wide text-ink flex-1">
+                  {selectedProviderPeriod?.period_label ?? "Week Detail"}
+                </h2>
+                {selectedProviderPeriod && (
+                  <span className="text-xs text-ink-secondary">
+                    Ending {weekEndingLabel(selectedProviderPeriod.period_key, selectedProviderPeriod.period_label)}
+                  </span>
+                )}
+              </div>
+              <div className="overflow-auto">
+                <table className="w-full border-collapse" style={{ minWidth: 980 }}>
+                  <thead>
+                    <tr>
+                      {["Date/Time", "DOS", "Setting", "Total RVU", "Payment", "OCR", ""].map((h, i) => (
+                        <th key={h} className={`${TH} ${i >= 3 && i <= 4 ? "text-right" : "text-left"}`}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {periodDrilldownLoading && (
+                      <tr><td colSpan={7} className="px-4 py-5 text-sm text-ink-secondary"><span className="inline-flex items-center gap-2"><Spinner /> Loading...</span></td></tr>
+                    )}
+                    {periodDrilldownErr && (
+                      <tr><td colSpan={7} className="px-4 py-5 text-sm text-red-600">{periodDrilldownErr}</td></tr>
+                    )}
+                    {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.length === 0 && (
+                      <tr><td colSpan={7} className="px-4 py-5 text-sm text-ink-secondary">No entries.</td></tr>
+                    )}
+                    {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.map((scan) => {
+                      const isEditing = editId === scan.id;
+                      const isDeleteConfirm = deleteConfirmId === scan.id;
+                      const isDeleting = deletingId === scan.id;
+                      const canMutate = admin.role === "superadmin";
+                      return [
+                        <tr key={`provider-scan-${scan.id}`} className={`${isEditing ? "bg-brand-muted/60" : isDeleteConfirm ? "bg-red-50" : "hover:bg-surface-soft"}`}>
+                          <td className={`${TD} text-xs whitespace-nowrap`}>{fmtDateTimeEt(scan.scanned_at)}</td>
+                          <td className={`${TD} text-xs whitespace-nowrap`}>{fmtCalendarDateMdY(scan.service_date)}</td>
+                          <td className={TD}>{scan.facility ? <span className="badge-blue">Facility</span> : <span className="badge-green">Non-Fac</span>}</td>
+                          <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{(scan.total_rvu ?? 0).toFixed(2)}</td>
+                          <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(scan.total_payment ?? 0)}</td>
+                          <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{scan.ocr_elapsed_label || "—"}</td>
+                          <td className={`${TD} text-right whitespace-nowrap`}>
+                            {isDeleteConfirm ? (
+                              <span className="inline-flex items-center gap-2">
+                                <span className="text-xs font-bold text-red-600">Delete?</span>
+                                <button onClick={() => void doDelete(scan.id)} disabled={isDeleting} className="btn-danger text-xs px-3 py-1.5">
+                                  {isDeleting ? <Spinner className="w-3 h-3" /> : "Yes"}
+                                </button>
+                                <button onClick={() => setDeleteConfirmId(null)} className="btn-secondary text-xs px-2 py-1.5">No</button>
+                              </span>
+                            ) : (
+                              <span className="inline-flex flex-wrap justify-end gap-2">
+                                <button onClick={() => void openScanDetails(scan.id)} disabled={detailLoadingId === scan.id} className="text-ink text-xs font-semibold border border-brand-border rounded-lg px-2.5 py-1 hover:bg-surface-soft transition-colors disabled:opacity-60">
+                                  {detailLoadingId === scan.id ? <Spinner className="w-3 h-3" /> : "Details"}
+                                </button>
+                                <button onClick={() => void openOcrReview(scan)} disabled={ocrReviewLoadingId === scan.id} className="text-amber-700 text-xs font-semibold border border-amber-200 rounded-lg px-2.5 py-1 hover:bg-amber-50 transition-colors disabled:opacity-60">
+                                  {ocrReviewLoadingId === scan.id ? <Spinner className="w-3 h-3" /> : "Review OCR"}
+                                </button>
+                                {canMutate && (
+                                  <>
+                                    <button onClick={() => startAdd(scan)} className="text-emerald-700 text-xs font-semibold border border-emerald-200 rounded-lg px-2.5 py-1 hover:bg-emerald-50 transition-colors">Add</button>
+                                    <button onClick={() => startEdit(scan)} className="text-indigo-600 text-xs font-semibold border border-indigo-200 rounded-lg px-2.5 py-1 hover:bg-indigo-50 transition-colors">Edit</button>
+                                    <button onClick={() => { cancelEdit(); setDeleteConfirmId(scan.id); }} className="text-red-600 text-xs font-semibold border border-red-200 rounded-lg px-2.5 py-1 hover:bg-red-50 transition-colors">Delete</button>
+                                  </>
+                                )}
+                              </span>
+                            )}
+                          </td>
+                        </tr>,
+                        isEditing && (
+                          <EditRow
+                            key={`provider-edit-${scan.id}`}
+                            scan={scan}
+                            draft={editDraft}
+                            setDraft={setEditDraft}
+                            saving={savingId === scan.id}
+                            onSave={() => void saveEdit(scan.id)}
+                            onCancel={cancelEdit}
+                            colCount={7}
+                            mode={editMode}
+                          />
+                        ),
+                      ];
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="card overflow-hidden min-h-0 flex flex-col">
+              <div className="px-4 py-3 border-b border-brand-border">
+                <h2 className="text-sm font-black uppercase tracking-wide text-ink">CPT Stats</h2>
+              </div>
+              <div className="overflow-auto">
+                <table className="w-full border-collapse" style={{ minWidth: 300 }}>
+                  <thead>
+                    <tr>
+                      {["CPT", "Count", "wRVU"].map((h, i) => (
+                        <th key={h} className={`${TH} ${i > 0 ? "text-right" : "text-left"}`}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(periodDrilldown?.cpt_mix ?? []).length === 0 && !periodDrilldownLoading && (
+                      <tr><td colSpan={3} className="px-4 py-5 text-sm text-ink-secondary">No CPTs.</td></tr>
+                    )}
+                    {(periodDrilldown?.cpt_mix ?? []).map((cpt) => (
+                      <tr key={cpt.cpt} className="hover:bg-surface-soft">
+                        <td className={`${TD} font-mono font-bold`}>{cpt.cpt}</td>
+                        <td className={`${TD} text-right font-mono tabular-nums`}>{cpt.count}</td>
+                        <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{cpt.wrvu.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {ocrReviewScan && (
         <div onClick={() => { setOcrReviewScan(null); setOcrReviewRuns([]); }} className="fixed inset-0 z-[205] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
