@@ -742,7 +742,7 @@ export default function PortalDashboardPage() {
     );
   }
 
-  const COL_COUNT = 13;
+  const COL_COUNT = 12;
 
   const navItems: { id: Tab; label: string }[] = [
     { id: "scans", label: "Scans" },
@@ -923,10 +923,10 @@ export default function PortalDashboardPage() {
 
             <div className="card overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 1120 }}>
+                <table className="w-full border-collapse" style={{ minWidth: 1040 }}>
                   <thead>
                     <tr>
-                      {["", "Scanned", "DOS", "MRN", "Staff", "Type", "Setting", "CPTs", "Total RVU", "Facility$", "Payment", "OCR", ""].map((h, i) => (
+                      {["", "Scanned", "DOS", "MRN", "Staff", "Type", "Setting", "CPTs", "Total RVU", "Facility$", "Payment", ""].map((h, i) => (
                         <th key={i} className={`${TH} ${i >= 8 && i < 11 ? "text-right" : "text-left"}`}>{h}</th>
                       ))}
                     </tr>
@@ -990,7 +990,6 @@ export default function PortalDashboardPage() {
                           <td className={`${TD} text-right font-mono tabular-nums text-sm`}>{(s.total_rvu ?? 0).toFixed(2)}</td>
                           <td className={`${TD} text-right font-mono tabular-nums text-sm`}>{fmt$(fin.facilityShare)}</td>
                           <td className={`${TD} text-right font-bold text-green-700 font-mono tabular-nums text-sm`}>{fmt$(s.total_payment ?? 0)}</td>
-                          <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{s.ocr_elapsed_label || "—"}</td>
                           {/* Actions */}
                           <td className={`${TD} text-right whitespace-nowrap`}>
                             {isEditing ? null : isDeleteConfirm ? (
@@ -1549,23 +1548,23 @@ export default function PortalDashboardPage() {
                 )}
               </div>
               <div className="overflow-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 980 }}>
+                <table className="w-full border-collapse" style={{ minWidth: 900 }}>
                   <thead>
                     <tr>
-                      {["Date/Time", "DOS", "Setting", "Total RVU", "Payment", "OCR", ""].map((h, i) => (
+                      {["Date/Time", "DOS", "Setting", "Total RVU", "Payment", ""].map((h, i) => (
                         <th key={h} className={`${TH} ${i >= 3 && i <= 4 ? "text-right" : "text-left"}`}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {periodDrilldownLoading && (
-                      <tr><td colSpan={7} className="px-4 py-5 text-sm text-ink-secondary"><span className="inline-flex items-center gap-2"><Spinner /> Loading...</span></td></tr>
+                      <tr><td colSpan={6} className="px-4 py-5 text-sm text-ink-secondary"><span className="inline-flex items-center gap-2"><Spinner /> Loading...</span></td></tr>
                     )}
                     {periodDrilldownErr && (
-                      <tr><td colSpan={7} className="px-4 py-5 text-sm text-red-600">{periodDrilldownErr}</td></tr>
+                      <tr><td colSpan={6} className="px-4 py-5 text-sm text-red-600">{periodDrilldownErr}</td></tr>
                     )}
                     {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.length === 0 && (
-                      <tr><td colSpan={7} className="px-4 py-5 text-sm text-ink-secondary">No entries.</td></tr>
+                      <tr><td colSpan={6} className="px-4 py-5 text-sm text-ink-secondary">No entries.</td></tr>
                     )}
                     {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.map((scan) => {
                       const isEditing = editId === scan.id;
@@ -1579,7 +1578,6 @@ export default function PortalDashboardPage() {
                           <td className={TD}>{scan.facility ? <span className="badge-blue">Facility</span> : <span className="badge-green">Non-Fac</span>}</td>
                           <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{(scan.total_rvu ?? 0).toFixed(2)}</td>
                           <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(scan.total_payment ?? 0)}</td>
-                          <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{scan.ocr_elapsed_label || "—"}</td>
                           <td className={`${TD} text-right whitespace-nowrap`}>
                             {isDeleteConfirm ? (
                               <span className="inline-flex items-center gap-2">
