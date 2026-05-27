@@ -21,6 +21,17 @@ import { fmtCalendarDateMdY, fmtDateTimeEt } from "../dates";
 
 type Tab = "scans" | "staff" | "devices" | "opnotes" | "settings";
 const SCAN_PAGE_SIZE = 100;
+type ProviderWeekDayGroup = {
+  dayKey: string;
+  dayLabel: string;
+  scans: PortalScanRow[];
+  patients: number;
+  facilityCases: number;
+  nonFacilityPatients: number;
+  cptLines: number;
+  wrvu: number;
+  payment: number;
+};
 
 const fmt$ = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
@@ -162,6 +173,24 @@ function listFinancialSummary(scan: PortalScanRow): ReturnType<typeof financialB
     assistCount: Number(scan.assist_count ?? 0),
     cptCount: Number(scan.cpt_count ?? 0),
   };
+}
+
+function patientCountForScans(scans: PortalScanRow[]): number {
+  const seen = new Set<string>();
+  scans.forEach((scan) => {
+    const mrn = scan.mrn?.trim();
+    if (mrn) {
+      seen.add(`mrn:${mrn.toLowerCase()}`);
+      return;
+    }
+    const name = scan.patient_name?.trim();
+    if (name) {
+      seen.add(`name:${name.toLowerCase()}:${scan.service_date ?? ""}`);
+      return;
+    }
+    seen.add(`scan:${scan.id}`);
+  });
+  return seen.size;
 }
 
 function prettyJson(value: unknown): string {
@@ -661,6 +690,42 @@ export default function PortalDashboardPage() {
     if (selectedProviderId === null || selectedProviderPeriodKey || selectedProviderPeriods.length === 0) return;
     setSelectedProviderPeriodKey(selectedProviderPeriods[0].period_key);
   }, [selectedProviderId, selectedProviderPeriodKey, selectedProviderPeriods]);
+
+  const providerWeekDayGroups = useMemo<ProviderWeekDayGroup[]>(() => {
+    const grouped = new Map<string, PortalScanRow[]>();
+    (periodDrilldown?.scans ?? []).forEach((scan) => {
+      const key = scan.service_date || "unknown";
+      const dayScans = grouped.get(key);
+      if (dayScans) {
+        dayScans.push(scan);
+      } else {
+        grouped.set(key, [scan]);
+      }
+    });
+
+    return Array.from(grouped.entries())
+      .sort(([a], [b]) => {
+        if (a === "unknown") return 1;
+        if (b === "unknown") return -1;
+        return a.localeCompare(b);
+      })
+      .map(([dayKey, dayScans]) => {
+        const sortedScans = dayScans
+          .slice()
+          .sort((a, b) => String(a.scanned_at ?? "").localeCompare(String(b.scanned_at ?? "")));
+        return {
+          dayKey,
+          dayLabel: dayKey === "unknown" ? "Missing DOS" : fmtCalendarDateMdY(dayKey),
+          scans: sortedScans,
+          patients: patientCountForScans(sortedScans),
+          facilityCases: sortedScans.filter((scan) => scan.facility).length,
+          nonFacilityPatients: sortedScans.filter((scan) => !scan.facility).length,
+          cptLines: sortedScans.reduce((sum, scan) => sum + Number(scan.cpt_count ?? listFinancialSummary(scan).cptCount ?? 0), 0),
+          wrvu: sortedScans.reduce((sum, scan) => sum + Number(scan.total_rvu ?? 0), 0),
+          payment: sortedScans.reduce((sum, scan) => sum + Number(scan.total_payment ?? 0), 0),
+        };
+      });
+  }, [periodDrilldown]);
 
   const openProviderDashboard = (provider: PortalDashboardProvider) => {
     if (!dashboard) return;
@@ -1566,61 +1631,76 @@ export default function PortalDashboardPage() {
                     {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.length === 0 && (
                       <tr><td colSpan={6} className="px-4 py-5 text-sm text-ink-secondary">No entries.</td></tr>
                     )}
-                    {!periodDrilldownLoading && !periodDrilldownErr && periodDrilldown?.scans.map((scan) => {
-                      const isEditing = editId === scan.id;
-                      const isDeleteConfirm = deleteConfirmId === scan.id;
-                      const isDeleting = deletingId === scan.id;
-                      const canMutate = admin.role === "superadmin";
-                      return [
-                        <tr key={`provider-scan-${scan.id}`} className={`${isEditing ? "bg-brand-muted/60" : isDeleteConfirm ? "bg-red-50" : "hover:bg-surface-soft"}`}>
-                          <td className={`${TD} text-xs whitespace-nowrap`}>{fmtDateTimeEt(scan.scanned_at)}</td>
-                          <td className={`${TD} text-xs whitespace-nowrap`}>{fmtCalendarDateMdY(scan.service_date)}</td>
-                          <td className={TD}>{scan.facility ? <span className="badge-blue">Facility</span> : <span className="badge-green">Non-Fac</span>}</td>
-                          <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{(scan.total_rvu ?? 0).toFixed(2)}</td>
-                          <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(scan.total_payment ?? 0)}</td>
-                          <td className={`${TD} text-right whitespace-nowrap`}>
-                            {isDeleteConfirm ? (
-                              <span className="inline-flex items-center gap-2">
-                                <span className="text-xs font-bold text-red-600">Delete?</span>
-                                <button onClick={() => void doDelete(scan.id)} disabled={isDeleting} className="btn-danger text-xs px-3 py-1.5">
-                                  {isDeleting ? <Spinner className="w-3 h-3" /> : "Yes"}
-                                </button>
-                                <button onClick={() => setDeleteConfirmId(null)} className="btn-secondary text-xs px-2 py-1.5">No</button>
-                              </span>
-                            ) : (
-                              <span className="inline-flex flex-wrap justify-end gap-2">
-                                <button onClick={() => void openScanDetails(scan.id)} disabled={detailLoadingId === scan.id} className="text-ink text-xs font-semibold border border-brand-border rounded-lg px-2.5 py-1 hover:bg-surface-soft transition-colors disabled:opacity-60">
-                                  {detailLoadingId === scan.id ? <Spinner className="w-3 h-3" /> : "Details"}
-                                </button>
-                                <button onClick={() => void openOcrReview(scan)} disabled={ocrReviewLoadingId === scan.id} className="text-amber-700 text-xs font-semibold border border-amber-200 rounded-lg px-2.5 py-1 hover:bg-amber-50 transition-colors disabled:opacity-60">
-                                  {ocrReviewLoadingId === scan.id ? <Spinner className="w-3 h-3" /> : "Review OCR"}
-                                </button>
-                                {canMutate && (
-                                  <>
-                                    <button onClick={() => startAdd(scan)} className="text-emerald-700 text-xs font-semibold border border-emerald-200 rounded-lg px-2.5 py-1 hover:bg-emerald-50 transition-colors">Add</button>
-                                    <button onClick={() => startEdit(scan)} className="text-indigo-600 text-xs font-semibold border border-indigo-200 rounded-lg px-2.5 py-1 hover:bg-indigo-50 transition-colors">Edit</button>
-                                    <button onClick={() => { cancelEdit(); setDeleteConfirmId(scan.id); }} className="text-red-600 text-xs font-semibold border border-red-200 rounded-lg px-2.5 py-1 hover:bg-red-50 transition-colors">Delete</button>
-                                  </>
-                                )}
-                              </span>
-                            )}
-                          </td>
-                        </tr>,
-                        isEditing && (
-                          <EditRow
-                            key={`provider-edit-${scan.id}`}
-                            scan={scan}
-                            draft={editDraft}
-                            setDraft={setEditDraft}
-                            saving={savingId === scan.id}
-                            onSave={() => void saveEdit(scan.id)}
-                            onCancel={cancelEdit}
-                            colCount={7}
-                            mode={editMode}
-                          />
-                        ),
-                      ];
-                    })}
+                    {!periodDrilldownLoading && !periodDrilldownErr && providerWeekDayGroups.flatMap((group) => [
+                      <tr key={`provider-day-${group.dayKey}`} className="bg-brand-muted/70 border-y border-brand-border">
+                        <td colSpan={6} className="px-3 py-2">
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                            <span className="font-black text-ink">{group.dayLabel}</span>
+                            <span className="font-semibold text-ink-secondary">{group.patients} patients</span>
+                            <span className="font-semibold text-ink-secondary">{group.nonFacilityPatients} clinic/non-fac</span>
+                            <span className="font-semibold text-ink-secondary">{group.facilityCases} facility cases</span>
+                            <span className="font-mono text-ink-secondary">{group.cptLines} CPT lines</span>
+                            <span className="font-mono text-ink-secondary">{group.wrvu.toFixed(2)} wRVU</span>
+                            <span className="font-mono font-bold text-green-700">{fmt$(group.payment)}</span>
+                          </div>
+                        </td>
+                      </tr>,
+                      ...group.scans.flatMap((scan) => {
+                        const isEditing = editId === scan.id;
+                        const isDeleteConfirm = deleteConfirmId === scan.id;
+                        const isDeleting = deletingId === scan.id;
+                        const canMutate = admin.role === "superadmin";
+                        return [
+                          <tr key={`provider-scan-${scan.id}`} className={`${isEditing ? "bg-brand-muted/60" : isDeleteConfirm ? "bg-red-50" : "hover:bg-surface-soft"}`}>
+                            <td className={`${TD} text-xs whitespace-nowrap`}>{fmtDateTimeEt(scan.scanned_at)}</td>
+                            <td className={`${TD} text-xs whitespace-nowrap`}>{fmtCalendarDateMdY(scan.service_date)}</td>
+                            <td className={TD}>{scan.facility ? <span className="badge-blue">Facility</span> : <span className="badge-green">Non-Fac</span>}</td>
+                            <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{(scan.total_rvu ?? 0).toFixed(2)}</td>
+                            <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(scan.total_payment ?? 0)}</td>
+                            <td className={`${TD} text-right whitespace-nowrap`}>
+                              {isDeleteConfirm ? (
+                                <span className="inline-flex items-center gap-2">
+                                  <span className="text-xs font-bold text-red-600">Delete?</span>
+                                  <button onClick={() => void doDelete(scan.id)} disabled={isDeleting} className="btn-danger text-xs px-3 py-1.5">
+                                    {isDeleting ? <Spinner className="w-3 h-3" /> : "Yes"}
+                                  </button>
+                                  <button onClick={() => setDeleteConfirmId(null)} className="btn-secondary text-xs px-2 py-1.5">No</button>
+                                </span>
+                              ) : (
+                                <span className="inline-flex flex-wrap justify-end gap-2">
+                                  <button onClick={() => void openScanDetails(scan.id)} disabled={detailLoadingId === scan.id} className="text-ink text-xs font-semibold border border-brand-border rounded-lg px-2.5 py-1 hover:bg-surface-soft transition-colors disabled:opacity-60">
+                                    {detailLoadingId === scan.id ? <Spinner className="w-3 h-3" /> : "Details"}
+                                  </button>
+                                  <button onClick={() => void openOcrReview(scan)} disabled={ocrReviewLoadingId === scan.id} className="text-amber-700 text-xs font-semibold border border-amber-200 rounded-lg px-2.5 py-1 hover:bg-amber-50 transition-colors disabled:opacity-60">
+                                    {ocrReviewLoadingId === scan.id ? <Spinner className="w-3 h-3" /> : "Review OCR"}
+                                  </button>
+                                  {canMutate && (
+                                    <>
+                                      <button onClick={() => startAdd(scan)} className="text-emerald-700 text-xs font-semibold border border-emerald-200 rounded-lg px-2.5 py-1 hover:bg-emerald-50 transition-colors">Add</button>
+                                      <button onClick={() => startEdit(scan)} className="text-indigo-600 text-xs font-semibold border border-indigo-200 rounded-lg px-2.5 py-1 hover:bg-indigo-50 transition-colors">Edit</button>
+                                      <button onClick={() => { cancelEdit(); setDeleteConfirmId(scan.id); }} className="text-red-600 text-xs font-semibold border border-red-200 rounded-lg px-2.5 py-1 hover:bg-red-50 transition-colors">Delete</button>
+                                    </>
+                                  )}
+                                </span>
+                              )}
+                            </td>
+                          </tr>,
+                          isEditing && (
+                            <EditRow
+                              key={`provider-edit-${scan.id}`}
+                              scan={scan}
+                              draft={editDraft}
+                              setDraft={setEditDraft}
+                              saving={savingId === scan.id}
+                              onSave={() => void saveEdit(scan.id)}
+                              onCancel={cancelEdit}
+                              colCount={6}
+                              mode={editMode}
+                            />
+                          ),
+                        ];
+                      }),
+                    ])}
                   </tbody>
                 </table>
               </div>
