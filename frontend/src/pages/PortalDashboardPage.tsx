@@ -507,11 +507,6 @@ export default function PortalDashboardPage() {
     return () => { cancelled = true; };
   }, [admin, dashboardRange, dashboardGroupBy, selectedProviderId, selectedProviderPeriodKey]);
 
-  useEffect(() => {
-    if (selectedProviderId === null || selectedProviderPeriodKey || selectedProviderPeriods.length === 0) return;
-    setSelectedProviderPeriodKey(selectedProviderPeriods[0].period_key);
-  }, [selectedProviderId, selectedProviderPeriodKey, selectedProviderPeriods]);
-
   const logout = async () => {
     await api.portalLogout();
     nav("/portal/login");
@@ -661,6 +656,11 @@ export default function PortalDashboardPage() {
     () => selectedProviderPeriods.find((period) => period.period_key === selectedProviderPeriodKey) ?? selectedProviderPeriods[0] ?? null,
     [selectedProviderPeriods, selectedProviderPeriodKey],
   );
+
+  useEffect(() => {
+    if (selectedProviderId === null || selectedProviderPeriodKey || selectedProviderPeriods.length === 0) return;
+    setSelectedProviderPeriodKey(selectedProviderPeriods[0].period_key);
+  }, [selectedProviderId, selectedProviderPeriodKey, selectedProviderPeriods]);
 
   const openProviderDashboard = (provider: PortalDashboardProvider) => {
     if (!dashboard) return;
