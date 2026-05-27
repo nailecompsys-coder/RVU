@@ -178,8 +178,8 @@ function isPrimaryOcrRun(run: PortalScanAiRun): boolean {
 
 function providerRoleRank(role: string | null | undefined): number {
   const value = role?.trim().toLowerCase();
-  if (value === "physician") return 0;
-  if (value === "pa" || value === "physician_assistant") return 1;
+  if (value === "physician" || value === "surgeon") return 0;
+  if (value === "pa" || value === "pa-c" || value === "physician_assistant" || value === "physician assistant") return 1;
   return 2;
 }
 

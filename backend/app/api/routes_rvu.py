@@ -673,6 +673,11 @@ def _provider_role_for_staff(staff: RvuStaff | None) -> str:
     return "surgeon"
 
 
+def _portal_dashboard_role_for_staff(staff: RvuStaff | None) -> str:
+    role = _provider_role_for_staff(staff)
+    return "pa" if role == "pa" else "physician"
+
+
 def _provider_name_key(value: str | None) -> str:
     cleaned = re.sub(r"\bdr\.?\b", " ", str(value or ""), flags=re.I)
     cleaned = re.sub(r"\b(pa|pa-c|physician assistant|md|do)\b", " ", cleaned, flags=re.I)
@@ -3372,7 +3377,7 @@ def portal_dashboard(
         staff.id: {
             "provider_id": staff.id,
             "provider_name": staff.full_name,
-            "role": _provider_role_for_staff(staff),
+            "role": _portal_dashboard_role_for_staff(staff),
             "is_active": bool(staff.is_active),
             "last_scan": None,
             "top_cpt": None,
