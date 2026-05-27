@@ -3358,7 +3358,13 @@ def portal_dashboard(
 
     staff_rows = (
         db.query(RvuStaff)
-        .filter(RvuStaff.staff_type.in_(["physician", "pa", "physician_assistant"]))
+        .filter(
+            RvuStaff.is_active == True,  # noqa: E712
+            or_(
+                RvuStaff.staff_type.in_(["physician", "pa", "physician_assistant"]),
+                RvuStaff.suffix.ilike("%PA%"),
+            ),
+        )
         .order_by(RvuStaff.last_name, RvuStaff.first_name)
         .all()
     )
@@ -3366,7 +3372,7 @@ def portal_dashboard(
         staff.id: {
             "provider_id": staff.id,
             "provider_name": staff.full_name,
-            "role": staff.staff_type,
+            "role": _provider_role_for_staff(staff),
             "is_active": bool(staff.is_active),
             "last_scan": None,
             "top_cpt": None,
