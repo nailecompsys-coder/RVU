@@ -411,7 +411,13 @@ export type PortalDashboardMetric = {
   annualized_est_payment_run_rate: number;
   rolling_7_day_avg_wrvu: number;
   rolling_30_day_avg_wrvu: number;
+  rolling_7_day_surgical_avg_wrvu: number;
+  rolling_30_day_surgical_avg_wrvu: number;
+  rolling_7_day_clinic_avg_wrvu: number;
+  rolling_30_day_clinic_avg_wrvu: number;
   best_day: PortalDashboardBestDay | null;
+  best_surgical_day: PortalDashboardBestDay | null;
+  best_clinic_day: PortalDashboardBestDay | null;
   active_scanners: number;
   pending_review: number;
   missing_mrn: number;

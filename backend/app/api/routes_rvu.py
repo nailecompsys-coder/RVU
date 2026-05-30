@@ -2307,29 +2307,31 @@ def _empty_metric_bucket() -> dict:
         "missing_service_date": 0,
         "active_scanners": set(),
         "days": {},
+        "clinic_days": {},
+        "surgical_days": {},
     }
 
 
-def _bucket_day_entry(bucket: dict, scan_day: date) -> dict:
+def _bucket_day_entry(bucket: dict, scan_day: date, key: str = "days") -> dict:
     day_key = scan_day.isoformat()
-    return bucket["days"].setdefault(day_key, {"scans": 0, "case_count": 0, "wrvu": 0.0, "est_payment": 0.0})
+    return bucket[key].setdefault(day_key, {"scans": 0, "case_count": 0, "wrvu": 0.0, "est_payment": 0.0})
 
 
-def _rolling_average_from_days(bucket: dict, *, end_date: date, days: int) -> float:
+def _rolling_average_from_days(bucket: dict, *, end_date: date, days: int, key: str = "days") -> float:
     start_date = end_date - timedelta(days=days - 1)
     total = 0.0
-    for day_key, item in bucket["days"].items():
+    for day_key, item in bucket[key].items():
         day = payment_svc.parse_service_date(day_key)
         if day and start_date <= day <= end_date:
             total += float(item.get("wrvu") or 0.0)
     return round(total / days, 2) if days > 0 else 0.0
 
 
-def _best_day_payload(bucket: dict) -> dict | None:
-    if not bucket["days"]:
+def _best_day_payload(bucket: dict, key: str = "days") -> dict | None:
+    if not bucket[key]:
         return None
     best_key, best = max(
-        bucket["days"].items(),
+        bucket[key].items(),
         key=lambda pair: (float(pair[1].get("wrvu") or 0.0), float(pair[1].get("est_payment") or 0.0), pair[0]),
     )
     return {
@@ -2355,11 +2357,19 @@ def _metric_payload(bucket: dict, *, start_date: date | None = None, end_date: d
     est_payment = round(float(bucket["est_payment"]), 2)
     annualized_wrvu = annualized_payment = 0.0
     rolling_7 = rolling_30 = 0.0
+    rolling_7_surgical = rolling_30_surgical = 0.0
+    rolling_7_clinic = rolling_30_clinic = 0.0
     best_day = _best_day_payload(bucket)
+    best_surgical_day = _best_day_payload(bucket, "surgical_days")
+    best_clinic_day = _best_day_payload(bucket, "clinic_days")
     if start_date and end_date:
         annualized_wrvu, annualized_payment = _annualized_from_bucket(bucket, start_date=start_date, end_date=end_date)
         rolling_7 = _rolling_average_from_days(bucket, end_date=end_date, days=7)
         rolling_30 = _rolling_average_from_days(bucket, end_date=end_date, days=30)
+        rolling_7_surgical = _rolling_average_from_days(bucket, end_date=end_date, days=7, key="surgical_days")
+        rolling_30_surgical = _rolling_average_from_days(bucket, end_date=end_date, days=30, key="surgical_days")
+        rolling_7_clinic = _rolling_average_from_days(bucket, end_date=end_date, days=7, key="clinic_days")
+        rolling_30_clinic = _rolling_average_from_days(bucket, end_date=end_date, days=30, key="clinic_days")
     return {
         "patients": patient_count,
         "scans": int(bucket["scans"]),
@@ -2375,7 +2385,13 @@ def _metric_payload(bucket: dict, *, start_date: date | None = None, end_date: d
         "annualized_est_payment_run_rate": annualized_payment,
         "rolling_7_day_avg_wrvu": rolling_7,
         "rolling_30_day_avg_wrvu": rolling_30,
+        "rolling_7_day_surgical_avg_wrvu": rolling_7_surgical,
+        "rolling_30_day_surgical_avg_wrvu": rolling_30_surgical,
+        "rolling_7_day_clinic_avg_wrvu": rolling_7_clinic,
+        "rolling_30_day_clinic_avg_wrvu": rolling_30_clinic,
         "best_day": best_day,
+        "best_surgical_day": best_surgical_day,
+        "best_clinic_day": best_clinic_day,
         "active_scanners": len(bucket["active_scanners"]),
         "pending_review": int(bucket["pending_review"]),
         "missing_mrn": int(bucket["missing_mrn"]),
@@ -2394,6 +2410,19 @@ def _scan_lines_for_dashboard(row) -> list[dict]:
             "work_payment": round(_scan_wrvu(row) * float(row.cf or 32.3465), 2),
         }]
     return []
+
+
+def _dashboard_work_type_from_lines(row, lines: list[dict]) -> str:
+    cpts = [
+        str(line.get("cpt") or line.get("code") or "").strip()
+        for line in lines
+        if str(line.get("cpt") or line.get("code") or "").strip()
+    ]
+    if not cpts and row.main_cpt:
+        cpts = [str(row.main_cpt).strip()]
+    if cpts and all(_is_clinic_cpt(cpt) for cpt in cpts):
+        return "clinic"
+    return "surgical"
 
 
 def _add_scan_to_bucket(bucket: dict, row, lines: list[dict], scan_day: date) -> None:
@@ -2428,6 +2457,11 @@ def _add_scan_to_bucket(bucket: dict, row, lines: list[dict], scan_day: date) ->
     day_entry["case_count"] += 1
     day_entry["wrvu"] += wrvu
     day_entry["est_payment"] += value
+    typed_day_entry = _bucket_day_entry(bucket, scan_day, f"{_dashboard_work_type_from_lines(row, lines)}_days")
+    typed_day_entry["scans"] += 1
+    typed_day_entry["case_count"] += 1
+    typed_day_entry["wrvu"] += wrvu
+    typed_day_entry["est_payment"] += value
 
 
 def _portal_scan_day(row, fallback: date) -> date:
@@ -2691,6 +2725,30 @@ def _sum_wrvu(scans: list[RvuScan]) -> float:
     return round(sum(_scan_wrvu(scan) for scan in scans if _is_verified_scan(scan)), 2)
 
 
+def _is_clinic_cpt(cpt: str | None) -> bool:
+    """E/M CPTs are clinic/rounding work; other primary CPTs are surgical/procedural."""
+    clean = str(cpt or "").strip()
+    return bool(re.fullmatch(r"99\d{3}", clean))
+
+
+def _scan_work_type(scan: RvuScan) -> str:
+    line_items = _primary_line_items(_parse_line_items(scan.line_items))
+    cpts = [
+        str(item.get("cpt") or item.get("code") or "").strip()
+        for item in line_items
+        if str(item.get("cpt") or item.get("code") or "").strip()
+    ]
+    if not cpts and scan.main_cpt:
+        cpts = [str(scan.main_cpt).strip()]
+    if cpts and all(_is_clinic_cpt(cpt) for cpt in cpts):
+        return "clinic"
+    return "surgical"
+
+
+def _filter_scans_by_work_type(scans: list[RvuScan], work_type: str) -> list[RvuScan]:
+    return [scan for scan in scans if _scan_work_type(scan) == work_type]
+
+
 def _sum_estimated_comp(scans: list[RvuScan]) -> float:
     return round(sum(_scan_wrvu(scan) * float(scan.cf or APP_CF_DEFAULT) for scan in scans if _is_verified_scan(scan)), 2)
 
@@ -2713,10 +2771,12 @@ def _trend_percent(current: float, previous: float) -> float:
     return round(((current - previous) / previous) * 100, 1)
 
 
-def _build_best_day_this_month(scans: list[RvuScan], today: date) -> dict[str, object] | None:
+def _build_best_day_this_month(scans: list[RvuScan], today: date, work_type: str | None = None) -> dict[str, object] | None:
     month_start = date(today.year, today.month, 1)
     grouped: dict[date, dict[str, object]] = {}
     for scan in _verified_scans_between(scans, month_start, today):
+        if work_type and _scan_work_type(scan) != work_type:
+            continue
         effective = _effective_scan_date(scan)
         if effective is None:
             continue
@@ -2958,6 +3018,10 @@ def staff_stats(
     prior_ytd_scans = _verified_scans_between(all_scans, prior_ytd_start, prior_ytd_end)
     seven_day_scans = _verified_scans_between(all_scans, today - timedelta(days=6), today)
     thirty_day_scans = _verified_scans_between(all_scans, today - timedelta(days=29), today)
+    seven_day_surgical_scans = _filter_scans_by_work_type(seven_day_scans, "surgical")
+    thirty_day_surgical_scans = _filter_scans_by_work_type(thirty_day_scans, "surgical")
+    seven_day_clinic_scans = _filter_scans_by_work_type(seven_day_scans, "clinic")
+    thirty_day_clinic_scans = _filter_scans_by_work_type(thirty_day_scans, "clinic")
     pending_count = sum(
         1
         for scan in all_scans
@@ -2995,7 +3059,13 @@ def staff_stats(
         "gap_to_goal_comp": round(gap_to_goal_wrvu * float(settings.cf or APP_CF_DEFAULT), 2),
         "rolling_7_day_avg_wrvu": round(_sum_wrvu(seven_day_scans) / 7, 2),
         "rolling_30_day_avg_wrvu": round(_sum_wrvu(thirty_day_scans) / 30, 2),
+        "rolling_7_day_surgical_avg_wrvu": round(_sum_wrvu(seven_day_surgical_scans) / 7, 2),
+        "rolling_30_day_surgical_avg_wrvu": round(_sum_wrvu(thirty_day_surgical_scans) / 30, 2),
+        "rolling_7_day_clinic_avg_wrvu": round(_sum_wrvu(seven_day_clinic_scans) / 7, 2),
+        "rolling_30_day_clinic_avg_wrvu": round(_sum_wrvu(thirty_day_clinic_scans) / 30, 2),
         "best_day_this_month": _build_best_day_this_month(all_scans, today),
+        "best_surgical_day_this_month": _build_best_day_this_month(all_scans, today, "surgical"),
+        "best_clinic_day_this_month": _build_best_day_this_month(all_scans, today, "clinic"),
         "prior_year_delta_wrvu": _trend_delta(ytd_wrvu, prior_ytd_wrvu),
         "prior_year_delta_percent": _trend_percent(ytd_wrvu, prior_ytd_wrvu),
         "monthly_trend": _build_monthly_trend(all_scans, today),
