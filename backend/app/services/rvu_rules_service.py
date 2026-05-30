@@ -63,6 +63,10 @@ def _clean_cpt(code: str) -> str:
     return re.sub(r"[^\d]", "", str(code or "").strip())[:5]
 
 
+def _clean_modifier_code(code: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(code or "").strip().upper())
+
+
 def _coerce_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -97,7 +101,7 @@ def get_effective_modifier_rules(db: Session) -> dict[str, dict[str, object]]:
     for code, raw in overrides.items():
         if not isinstance(raw, dict):
             continue
-        key = str(code or "").strip().upper()
+        key = _clean_modifier_code(str(code or ""))
         if not key:
             continue
         rule = rules.get(key, {"code": key, "factor": 1.0, "desc": key})
@@ -135,7 +139,7 @@ def patch_modifier_rule(
     added_by_staff_name: str | None = None,
     added_at: str | None = None,
 ) -> dict[str, object]:
-    key = str(code or "").strip().upper()
+    key = _clean_modifier_code(code)
     if not key:
         raise ValueError("Modifier code is required")
     overrides = _load_rule_config(db, MODIFIER_RULE_CONFIG_ID)

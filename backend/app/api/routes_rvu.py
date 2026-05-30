@@ -490,14 +490,13 @@ def _extract_modifiers(lines: list[dict] | None) -> dict[str, str]:
     mods: dict[str, str] = {}
     if not lines:
         return mods
-    import re as _re
     for L in lines:
         if not isinstance(L, dict):
             continue
         cpt = str(L.get("cpt") or "").strip()
-        if not _re.fullmatch(r"\d{5}", cpt):
+        if not re.fullmatch(r"\d{5}", cpt):
             continue
-        modifier = str(L.get("modifier") or "").strip().upper()
+        modifier = _normalize_modifier_text(str(L.get("modifier") or ""))
         if not modifier:
             continue
         role = str(L.get("provider_role") or "").strip().lower()
@@ -510,6 +509,15 @@ def _extract_modifiers(lines: list[dict] | None) -> dict[str, str]:
         if clean and cpt not in mods:
             mods[cpt] = clean
     return mods
+
+
+def _normalize_modifier_text(value: str) -> str:
+    parts = [
+        re.sub(r"[^A-Z0-9]", "", p.strip().upper())
+        for p in str(value or "").replace("/", ",").split(",")
+        if p.strip()
+    ]
+    return ",".join(dict.fromkeys(p for p in parts if p))
 
 
 def _preview_from_capture(
@@ -1101,7 +1109,7 @@ def _reconciliation_line_items(lines: list[dict] | None) -> list[dict]:
         cpt = str(line.get("cpt") or "").strip()
         if not re.fullmatch(r"\d{5}", cpt):
             continue
-        modifier = str(line.get("modifier") or "").strip().upper()
+        modifier = _normalize_modifier_text(str(line.get("modifier") or ""))
         provider_name = str(line.get("provider_name") or "").strip()
         provider_role = str(line.get("provider_role") or "unknown").strip().lower()
         if provider_role not in ("surgeon", "pa", "assistant", "unknown"):
@@ -1147,7 +1155,7 @@ def _select_line_items_for_cpts(
         cpt = str(item.get("cpt") or "").strip()
         if not re.fullmatch(r"\d{5}", cpt):
             continue
-        modifier = str(item.get("modifier") or "").strip().upper()
+        modifier = _normalize_modifier_text(str(item.get("modifier") or ""))
         is_assist = bool(item.get("is_assist")) or "AS" in modifier or str(item.get("provider_role") or "").strip().lower() in ("pa", "assistant")
         target = assist_pool if is_assist else primary_pool
         target.setdefault(cpt, []).append(dict(item))

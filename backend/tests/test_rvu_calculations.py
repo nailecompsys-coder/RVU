@@ -39,6 +39,36 @@ class RvuCalculationTests(unittest.TestCase):
         self.assertEqual(rows[0]["payment"], 571.95)
         self.assertEqual(total, 571.95)
 
+    def test_alphanumeric_modifier_rule_is_supported(self):
+        row = calc_payment(
+            "27871",
+            "99",
+            False,
+            41.0,
+            modifier="1P",
+            modifier_rules={"1P": {"factor": 0.75, "desc": "Performance measure exclusion"}},
+        )
+
+        self.assertEqual(row.modifier_code, "1P")
+        self.assertEqual(row.modifier_factor, 0.75)
+        self.assertEqual(row.work_rvu, 6.98)
+
+    def test_modifier_normalization_keeps_letters_and_numbers(self):
+        svc = RvuPaymentService()
+
+        rows, total = svc.build_rows(
+            ["27871"],
+            "99",
+            False,
+            41.0,
+            modifiers={"27871": "-1p"},
+            modifier_rules={"1P": {"factor": 0.75, "desc": "Performance measure exclusion"}},
+        )
+
+        self.assertEqual(rows[0]["modifier"], "1P")
+        self.assertEqual(rows[0]["modifier_code"], "1P")
+        self.assertEqual(total, 285.98)
+
 
 if __name__ == "__main__":
     unittest.main()

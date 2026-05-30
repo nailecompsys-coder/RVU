@@ -4,6 +4,7 @@ import csv
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import re
 
 _DATA = Path(__file__).resolve().parent / "data"
 
@@ -57,7 +58,11 @@ def _resolve_modifier(
         code: {"factor": factor, "desc": DEFAULT_MODIFIER_DESC.get(code, code)}
         for code, factor in DEFAULT_MODIFIER_FACTORS.items()
     }
-    codes = [c.strip().upper() for c in modifier_str.replace("/", ",").split(",") if c.strip()]
+    codes = [
+        re.sub(r"[^A-Z0-9]", "", c.strip().upper())
+        for c in modifier_str.replace("/", ",").split(",")
+        if c.strip()
+    ]
     for code in codes:
         if code in effective_rules:
             rule = effective_rules.get(code) or {}
@@ -65,6 +70,15 @@ def _resolve_modifier(
             desc = str(rule.get("desc") or code)
             return code, factor, desc
     return "", 1.0, ""
+
+
+def _normalize_modifier_str(modifier_str: str) -> str:
+    codes = [
+        re.sub(r"[^A-Z0-9]", "", c.strip().upper())
+        for c in str(modifier_str or "").replace("/", ",").split(",")
+        if c.strip()
+    ]
+    return ",".join(dict.fromkeys(c for c in codes if c))
 
 
 @dataclass(frozen=True)
@@ -203,6 +217,7 @@ def calc_payment(
     adj_work = rvu.work_rvu * gpci.pw_gpci
     adj_pe = pe * gpci.pe_gpci
     adj_mp = rvu.mp_rvu * gpci.mp_gpci
+    modifier = _normalize_modifier_str(modifier)
     mod_code, mod_factor, mod_desc = _resolve_modifier(modifier, modifier_rules=modifier_rules)
 
     adjusted_work_rvu = rvu.work_rvu * mod_factor

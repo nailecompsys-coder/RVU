@@ -17,6 +17,15 @@ from app.rvu.lookup import CF_2026, RvuRow, calc_payment, get_localities
 APP_CF_DEFAULT = float(os.environ.get("RVU_DEFAULT_CF", "41.0"))
 
 
+def _normalize_modifier_text(value: str) -> str:
+    parts = [
+        re.sub(r"[^A-Z0-9]", "", p.strip().upper())
+        for p in str(value or "").replace("/", ",").split(",")
+        if p.strip()
+    ]
+    return ",".join(dict.fromkeys(p for p in parts if p))
+
+
 class RvuPaymentService:
     """Build CPT payment rows and persist scan history."""
 
@@ -36,7 +45,7 @@ class RvuPaymentService:
     ) -> tuple[list[dict[str, Any]], float]:
         rows: list[dict[str, Any]] = []
         for cpt in cpts:
-            mod = (modifiers or {}).get(cpt, "")
+            mod = _normalize_modifier_text((modifiers or {}).get(cpt, ""))
             r = calc_payment(
                 cpt,
                 locality,
@@ -87,7 +96,7 @@ class RvuPaymentService:
             cpt = str(line.get("cpt") or "").strip()
             if not re.fullmatch(r"\d{5}", cpt):
                 continue
-            modifier = str(line.get("modifier") or "").strip().upper()
+            modifier = _normalize_modifier_text(str(line.get("modifier") or ""))
             role = str(line.get("provider_role") or "").strip().lower()
             is_assist = bool(line.get("is_assist")) or role in ("pa", "assistant") or "AS" in modifier
             if is_assist:

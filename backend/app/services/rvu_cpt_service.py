@@ -317,15 +317,17 @@ def _valid_mrn_or_none(value: Any) -> str | None:
     return None
 
 
-_KNOWN_MODIFIER_CODES = {
-    "22", "50", "51", "52", "53", "57", "58", "59",
-    "62", "66", "78", "79", "80", "81", "82", "AS", "LT", "RT",
-}
-
-
 def _split_modifier_codes(text: str) -> tuple[str, ...]:
-    parts = [p.strip().upper() for p in str(text or "").replace("/", ",").split(",") if p.strip()]
-    return tuple(dict.fromkeys(p for p in parts if p in _KNOWN_MODIFIER_CODES))
+    parts = [
+        re.sub(r"[^A-Z0-9]", "", p.strip().upper())
+        for p in str(text or "").replace("/", ",").split(",")
+        if p.strip()
+    ]
+    return tuple(dict.fromkeys(p for p in parts if re.fullmatch(r"[A-Z0-9]{1,4}", p)))
+
+
+def _normalize_modifier_text(text: str) -> str:
+    return ",".join(_split_modifier_codes(text))
 
 
 def _parse_datetime_bits(text: str) -> tuple[str | None, str | None, str | None]:
@@ -546,7 +548,7 @@ def _line_from_row(row: dict) -> dict[str, Any] | None:
     provider_role = str(row.get("provider_role") or row.get("role") or "unknown").strip().lower()
     if provider_role not in ("surgeon", "pa", "assistant", "unknown"):
         provider_role = "unknown"
-    modifier = str(row.get("modifier") or row.get("modifiers") or "").strip().upper()
+    modifier = _normalize_modifier_text(str(row.get("modifier") or row.get("modifiers") or ""))
     is_assist = bool(row.get("is_assist")) or ("AS" in modifier) or (" AS" in proc.upper()) or provider_role in ("pa", "assistant")
     line_sd = _line_service_date_from_row(row)
     out: dict[str, Any] = {
@@ -587,7 +589,11 @@ def _line_dedupe_key(line: dict[str, Any]) -> tuple[str, str, str, bool, str]:
 
 
 def _modifier_tokens(value: str) -> tuple[str, ...]:
-    parts = [p.strip().upper() for p in str(value or "").split(",") if p.strip()]
+    parts = [
+        re.sub(r"[^A-Z0-9]", "", p.strip().upper())
+        for p in str(value or "").replace("/", ",").split(",")
+        if p.strip()
+    ]
     return tuple(dict.fromkeys(parts))
 
 
@@ -991,7 +997,7 @@ class RvuCptExtractionService:
                     "procedure_name": str(row.get("procedure_name") or "").strip(),
                     "provider_name": str(row.get("provider_name") or "").strip(),
                     "provider_role": str(row.get("provider_role") or "unknown").strip().lower(),
-                    "modifier": str(row.get("modifier") or "").strip().upper(),
+                    "modifier": _normalize_modifier_text(str(row.get("modifier") or "")),
                     "line_service_date": str(row.get("line_service_date") or "").strip(),
                 }
             )
