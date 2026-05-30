@@ -36,6 +36,9 @@ type ProviderWeekDayGroup = {
 const fmt$ = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
 
+const fmtCompact$ = (n: number) =>
+  n.toLocaleString("en-US", { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1 });
+
 /** Physicians first, then other roles; then last / first name. */
 function sortStaffMembers(a: StaffMember, b: StaffMember): number {
   const rank = (t: string | null | undefined) => {
@@ -341,6 +344,7 @@ export default function PortalDashboardPage() {
   const [tab, setTab] = useState<Tab>("scans");
   const [dashboardRange, setDashboardRange] = useState("month");
   const [dashboardGroupBy, setDashboardGroupBy] = useState("week");
+  const [dashboardScopeProviderId, setDashboardScopeProviderId] = useState<number | null>(null);
   const [dashboard, setDashboard] = useState<PortalDashboardResponse | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardErr, setDashboardErr] = useState<string | null>(null);
@@ -489,11 +493,11 @@ export default function PortalDashboardPage() {
     let cancelled = false;
     setDashboardLoading(true);
     setDashboardErr(null);
-    api.portalDashboard(dashboardRange, dashboardGroupBy)
+    api.portalDashboard(dashboardRange, dashboardGroupBy, dashboardScopeProviderId)
       .then((payload) => {
         if (cancelled) return;
         setDashboard(payload);
-        if (selectedProviderId && !payload.providers.some((provider) => provider.provider_id === selectedProviderId)) {
+        if (selectedProviderId && !payload.provider_options.some((provider) => provider.provider_id === selectedProviderId)) {
           setSelectedProviderId(null);
           setSelectedProviderPeriodKey(null);
         }
@@ -505,7 +509,7 @@ export default function PortalDashboardPage() {
         if (!cancelled) setDashboardLoading(false);
       });
     return () => { cancelled = true; };
-  }, [admin, dashboardRange, dashboardGroupBy]);
+  }, [admin, dashboardRange, dashboardGroupBy, dashboardScopeProviderId]);
 
   useEffect(() => {
     if (!admin || selectedProviderId === null || !selectedProviderPeriodKey) {
@@ -721,8 +725,8 @@ export default function PortalDashboardPage() {
           facilityCases: sortedScans.filter((scan) => scan.facility).length,
           nonFacilityPatients: sortedScans.filter((scan) => !scan.facility).length,
           cptLines: sortedScans.reduce((sum, scan) => sum + Number(scan.cpt_count ?? listFinancialSummary(scan).cptCount ?? 0), 0),
-          wrvu: sortedScans.reduce((sum, scan) => sum + Number(scan.total_rvu ?? 0), 0),
-          payment: sortedScans.reduce((sum, scan) => sum + Number(scan.total_payment ?? 0), 0),
+          wrvu: sortedScans.reduce((sum, scan) => sum + Number(listFinancialSummary(scan).workRvu ?? 0), 0),
+          payment: sortedScans.reduce((sum, scan) => sum + Number(listFinancialSummary(scan).surgeonValue ?? 0), 0),
         };
       });
   }, [periodDrilldown]);
@@ -877,7 +881,7 @@ export default function PortalDashboardPage() {
         {/* ══════════════ SCANS TAB ══════════════ */}
         {tab === "scans" && (
           <div className="flex flex-col">
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px] mb-4">
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px_160px_160px] mb-4">
               <div>
                 <h1 className="text-xl font-black text-ink tracking-tight">Practice Dashboard</h1>
                 {dashboard && (
@@ -885,6 +889,30 @@ export default function PortalDashboardPage() {
                     {fmtCalendarDateMdY(dashboard.range.start)} - {fmtCalendarDateMdY(dashboard.range.end)}
                   </div>
                 )}
+              </div>
+              <div>
+                <label className="label">Provider</label>
+                <select
+                  className="input text-xs"
+                  value={dashboardScopeProviderId ?? ""}
+                  onChange={(e) => {
+                    const next = e.target.value ? Number(e.target.value) : null;
+                    setDashboardScopeProviderId(next);
+                    setSelectedProviderId(null);
+                    setSelectedProviderPeriodKey(null);
+                    setPeriodDrilldown(null);
+                  }}
+                >
+                  <option value="">All practice</option>
+                  {(dashboard?.provider_options ?? [])
+                    .slice()
+                    .sort((a, b) => a.provider_name.localeCompare(b.provider_name))
+                    .map((provider) => (
+                      <option key={provider.provider_id} value={provider.provider_id}>
+                        {provider.provider_name}
+                      </option>
+                    ))}
+                </select>
               </div>
               <div>
                 <label className="label">Range</label>
@@ -923,6 +951,50 @@ export default function PortalDashboardPage() {
 
             {dashboard && (
               <div className="space-y-4 mb-6 order-2">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="card p-4">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Annualized wRVU Run Rate</div>
+                    <div className="mt-2 text-2xl font-black text-ink tabular-nums">
+                      {dashboard.practice.annualized_wrvu_run_rate.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    </div>
+                    <div className="mt-1 text-xs text-ink-secondary">
+                      {fmtCompact$(dashboard.practice.annualized_est_payment_run_rate)} annualized surgeon value
+                    </div>
+                  </div>
+                  <div className="card p-4">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Current Period</div>
+                    <div className="mt-2 text-2xl font-black text-ink tabular-nums">{dashboard.practice.wrvu.toFixed(2)}</div>
+                    <div className="mt-1 text-xs text-ink-secondary">
+                      {dashboard.practice.case_count} verified case{dashboard.practice.case_count === 1 ? "" : "s"} · {fmt$(dashboard.practice.est_payment)}
+                    </div>
+                  </div>
+                  <div className="card p-4">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Average Per Case</div>
+                    <div className="mt-2 text-2xl font-black text-ink tabular-nums">{dashboard.practice.avg_wrvu_per_case.toFixed(2)}</div>
+                    <div className="mt-1 text-xs text-ink-secondary">{fmt$(dashboard.practice.avg_payment_per_case)} per verified case</div>
+                  </div>
+                  <div className="card p-4">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Best Day</div>
+                    {dashboard.practice.best_day ? (
+                      <>
+                        <div className="mt-2 text-2xl font-black text-ink tabular-nums">{dashboard.practice.best_day.wrvu.toFixed(2)}</div>
+                        <div className="mt-1 text-xs text-ink-secondary">
+                          {fmtCalendarDateMdY(dashboard.practice.best_day.date)} · {dashboard.practice.best_day.case_count} case{dashboard.practice.best_day.case_count === 1 ? "" : "s"}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="mt-2 text-2xl font-black text-ink tabular-nums">0.00</div>
+                        <div className="mt-1 text-xs text-ink-secondary">No verified cases in range</div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <DetailMetric label="7-day avg wRVU" value={dashboard.practice.rolling_7_day_avg_wrvu.toFixed(2)} />
+                  <DetailMetric label="30-day avg wRVU" value={dashboard.practice.rolling_30_day_avg_wrvu.toFixed(2)} />
+                  <DetailMetric label="Pending review" value={`${dashboard.practice.pending_review}`} />
+                </div>
                 <div className="grid gap-4">
                   <div className="card overflow-hidden">
                     <div className="px-4 py-3 border-b border-brand-border">
@@ -932,8 +1004,8 @@ export default function PortalDashboardPage() {
                       <table className="w-full border-collapse" style={{ minWidth: 900 }}>
                         <thead>
                           <tr>
-                            {["Provider", "Role", "Patients", "Scans", "CPTs", "wRVU", "Est. $", "Avg", "Last Scan"].map((h, i) => (
-                              <th key={h} className={`${TH} ${i >= 2 && i <= 7 ? "text-right" : "text-left"}`}>{h}</th>
+                            {["Provider", "Role", "Patients", "Cases", "CPTs", "wRVU", "Est. $", "Avg / Case", "Pending", "Last Scan"].map((h, i) => (
+                              <th key={h} className={`${TH} ${i >= 2 && i <= 8 ? "text-right" : "text-left"}`}>{h}</th>
                             ))}
                           </tr>
                         </thead>
@@ -942,7 +1014,7 @@ export default function PortalDashboardPage() {
                             if (row.type === "group") {
                               return (
                                 <tr key={row.key}>
-                                  <td colSpan={9} className={GROUP_TD}>{row.label}</td>
+                                  <td colSpan={10} className={GROUP_TD}>{row.label}</td>
                                 </tr>
                               );
                             }
@@ -956,11 +1028,12 @@ export default function PortalDashboardPage() {
                                 <td className={`${TD} font-bold`}>{provider.provider_name}</td>
                                 <td className={TD}>{provider.role ? <span className="badge-blue">{staffRoleLabel(provider.role)}</span> : "—"}</td>
                                 <td className={`${TD} text-right font-mono tabular-nums`}>{provider.patients}</td>
-                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.scans}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.case_count}</td>
                                 <td className={`${TD} text-right font-mono tabular-nums`}>{provider.cpt_lines}</td>
                                 <td className={`${TD} text-right font-mono tabular-nums font-bold`}>{provider.wrvu.toFixed(2)}</td>
                                 <td className={`${TD} text-right font-mono tabular-nums`}>{fmt$(provider.est_payment)}</td>
-                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.avg_wrvu_per_patient.toFixed(2)}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.avg_wrvu_per_case.toFixed(2)}</td>
+                                <td className={`${TD} text-right font-mono tabular-nums`}>{provider.pending_review}</td>
                                 <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{provider.last_scan ? fmtDateTimeEt(provider.last_scan) : "—"}</td>
                               </tr>
                             );

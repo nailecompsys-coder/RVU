@@ -62,6 +62,14 @@ def _ensure_rvu_schema(conn: Connection) -> None:
     )
     conn.execute(text("UPDATE rvu_scans SET scan_status = 'verified' WHERE scan_status IS NULL"))
 
+    if inspector.has_table("rvu_user_settings"):
+        settings_columns = {col["name"] for col in inspector.get_columns("rvu_user_settings")}
+        if "annual_wrvu_goal" not in settings_columns:
+            conn.execute(
+                text("ALTER TABLE rvu_user_settings ADD COLUMN IF NOT EXISTS annual_wrvu_goal DOUBLE PRECISION DEFAULT 9000.0")
+            )
+        conn.execute(text("UPDATE rvu_user_settings SET annual_wrvu_goal = 9000.0 WHERE annual_wrvu_goal IS NULL"))
+
 
 def _initialize_schema_once() -> None:
     with engine.begin() as conn:

@@ -195,12 +195,17 @@ def _primary_line_items(line_items: list[dict]) -> list[dict]:
     return [
         item
         for item in line_items
-        if not bool(item.get("is_assist"))
+        if not _is_assist_line_item(item)
     ]
 
 
 def _is_assist_line_item(item: dict) -> bool:
-    return bool(item.get("is_assist")) or bool(re.search(r"\bAS\b", str(item.get("modifier") or ""), re.I))
+    role = str(item.get("provider_role") or "").strip().lower()
+    return (
+        bool(item.get("is_assist"))
+        or role in ("pa", "assistant", "physician_assistant")
+        or bool(re.search(r"\bAS\b", str(item.get("modifier") or ""), re.I))
+    )
 
 
 def _scan_financial_summary(scan: RvuScan, line_items: list[dict] | None = None) -> dict[str, float | int]:
@@ -408,6 +413,7 @@ def _get_or_create_user_settings(db: Session, surgeon_id: int) -> RvuUserSetting
         default_facility=True,
         cms_locality_num="99",
         cf=APP_CF_DEFAULT,
+        annual_wrvu_goal=9000.0,
         show_estimated_dollars=True,
         auto_suggest_from_scan=True,
         cloud_sync_enabled=True,
@@ -423,6 +429,7 @@ def _settings_dict(row: RvuUserSettings) -> dict[str, object]:
         "default_facility": bool(row.default_facility),
         "cms_locality_num": row.cms_locality_num or "99",
         "cf": float(row.cf or APP_CF_DEFAULT),
+        "annual_wrvu_goal": float(row.annual_wrvu_goal or 9000.0),
         "show_estimated_dollars": bool(row.show_estimated_dollars),
         "auto_suggest_from_scan": bool(row.auto_suggest_from_scan),
         "cloud_sync_enabled": bool(row.cloud_sync_enabled),
@@ -2290,6 +2297,8 @@ def _empty_metric_bucket() -> dict:
         "patients": set(),
         "unknown_patients": 0,
         "scans": 0,
+        "verified_scans": 0,
+        "case_count": 0,
         "cpt_lines": 0,
         "wrvu": 0.0,
         "est_payment": 0.0,
@@ -2297,19 +2306,76 @@ def _empty_metric_bucket() -> dict:
         "missing_mrn": 0,
         "missing_service_date": 0,
         "active_scanners": set(),
+        "days": {},
     }
 
 
-def _metric_payload(bucket: dict) -> dict:
+def _bucket_day_entry(bucket: dict, scan_day: date) -> dict:
+    day_key = scan_day.isoformat()
+    return bucket["days"].setdefault(day_key, {"scans": 0, "case_count": 0, "wrvu": 0.0, "est_payment": 0.0})
+
+
+def _rolling_average_from_days(bucket: dict, *, end_date: date, days: int) -> float:
+    start_date = end_date - timedelta(days=days - 1)
+    total = 0.0
+    for day_key, item in bucket["days"].items():
+        day = payment_svc.parse_service_date(day_key)
+        if day and start_date <= day <= end_date:
+            total += float(item.get("wrvu") or 0.0)
+    return round(total / days, 2) if days > 0 else 0.0
+
+
+def _best_day_payload(bucket: dict) -> dict | None:
+    if not bucket["days"]:
+        return None
+    best_key, best = max(
+        bucket["days"].items(),
+        key=lambda pair: (float(pair[1].get("wrvu") or 0.0), float(pair[1].get("est_payment") or 0.0), pair[0]),
+    )
+    return {
+        "date": best_key,
+        "wrvu": round(float(best.get("wrvu") or 0.0), 2),
+        "est_payment": round(float(best.get("est_payment") or 0.0), 2),
+        "case_count": int(best.get("case_count") or 0),
+        "scans": int(best.get("scans") or 0),
+    }
+
+
+def _annualized_from_bucket(bucket: dict, *, start_date: date, end_date: date) -> tuple[float, float]:
+    elapsed_days = max((end_date - start_date).days + 1, 1)
+    wrvu = float(bucket.get("wrvu") or 0.0)
+    value = float(bucket.get("est_payment") or 0.0)
+    return round(wrvu / elapsed_days * 365.0, 2), round(value / elapsed_days * 365.0, 2)
+
+
+def _metric_payload(bucket: dict, *, start_date: date | None = None, end_date: date | None = None) -> dict:
     patient_count = len(bucket["patients"]) + int(bucket["unknown_patients"])
     wrvu = round(float(bucket["wrvu"]), 2)
+    case_count = int(bucket["case_count"])
+    est_payment = round(float(bucket["est_payment"]), 2)
+    annualized_wrvu = annualized_payment = 0.0
+    rolling_7 = rolling_30 = 0.0
+    best_day = _best_day_payload(bucket)
+    if start_date and end_date:
+        annualized_wrvu, annualized_payment = _annualized_from_bucket(bucket, start_date=start_date, end_date=end_date)
+        rolling_7 = _rolling_average_from_days(bucket, end_date=end_date, days=7)
+        rolling_30 = _rolling_average_from_days(bucket, end_date=end_date, days=30)
     return {
         "patients": patient_count,
         "scans": int(bucket["scans"]),
+        "verified_scans": int(bucket["verified_scans"]),
+        "case_count": case_count,
         "cpt_lines": int(bucket["cpt_lines"]),
         "wrvu": wrvu,
-        "est_payment": round(float(bucket["est_payment"]), 2),
+        "est_payment": est_payment,
         "avg_wrvu_per_patient": round(wrvu / patient_count, 2) if patient_count else 0.0,
+        "avg_wrvu_per_case": round(wrvu / case_count, 2) if case_count else 0.0,
+        "avg_payment_per_case": round(est_payment / case_count, 2) if case_count else 0.0,
+        "annualized_wrvu_run_rate": annualized_wrvu,
+        "annualized_est_payment_run_rate": annualized_payment,
+        "rolling_7_day_avg_wrvu": rolling_7,
+        "rolling_30_day_avg_wrvu": rolling_30,
+        "best_day": best_day,
         "active_scanners": len(bucket["active_scanners"]),
         "pending_review": int(bucket["pending_review"]),
         "missing_mrn": int(bucket["missing_mrn"]),
@@ -2320,12 +2386,12 @@ def _metric_payload(bucket: dict) -> dict:
 def _scan_lines_for_dashboard(row) -> list[dict]:
     items = _parse_line_items(row.line_items)
     if items:
-        return items
+        return _primary_line_items(items)
     if row.main_cpt:
         return [{
             "cpt": row.main_cpt,
-            "work_rvu": row.total_rvu or 0.0,
-            "payment": row.total_payment or 0.0,
+            "work_rvu": _scan_wrvu(row),
+            "work_payment": round(_scan_wrvu(row) * float(row.cf or 32.3465), 2),
         }]
     return []
 
@@ -2342,10 +2408,26 @@ def _add_scan_to_bucket(bucket: dict, row, lines: list[dict], scan_day: date) ->
         bucket["missing_service_date"] += 1
     if (row.scan_status or "verified") == "pending_review":
         bucket["pending_review"] += 1
+        return
+
     bucket["active_scanners"].add(row.surgeon_id)
+    bucket["verified_scans"] += 1
+    bucket["case_count"] += 1
     bucket["cpt_lines"] += len(lines)
-    bucket["wrvu"] += sum(float(line.get("work_rvu") or line.get("total_rvu") or 0.0) for line in lines)
-    bucket["est_payment"] += float(row.total_payment or 0.0)
+    wrvu = sum(float(line.get("work_rvu") or line.get("total_rvu") or 0.0) for line in lines)
+    has_work_payment = any(line.get("work_payment") is not None for line in lines)
+    value = (
+        sum(float(line.get("work_payment") or 0.0) for line in lines)
+        if has_work_payment
+        else wrvu * float(row.cf or 32.3465)
+    )
+    bucket["wrvu"] += wrvu
+    bucket["est_payment"] += value
+    day_entry = _bucket_day_entry(bucket, scan_day)
+    day_entry["scans"] += 1
+    day_entry["case_count"] += 1
+    day_entry["wrvu"] += wrvu
+    day_entry["est_payment"] += value
 
 
 def _portal_scan_day(row, fallback: date) -> date:
@@ -2362,8 +2444,9 @@ def _add_line_to_cpt_mix(target: dict[str, dict], *, line: dict, row, provider_i
     )
     entry["count"] += 1
     entry["patients"].add(patient_key)
-    entry["wrvu"] += float(line.get("work_rvu") or line.get("total_rvu") or 0.0)
-    entry["est_payment"] += float(line.get("payment") or 0.0)
+    wrvu = float(line.get("work_rvu") or line.get("total_rvu") or 0.0)
+    entry["wrvu"] += wrvu
+    entry["est_payment"] += float(line.get("work_payment") if line.get("work_payment") is not None else wrvu * float(row.cf or 32.3465))
     entry["providers"].add(provider_id)
 
 
@@ -2438,6 +2521,7 @@ class SettingsBody(BaseModel):
     default_facility: bool | None = None
     cms_locality_num: str | None = None
     cf: float | None = None
+    annual_wrvu_goal: float | None = None
     show_estimated_dollars: bool | None = None
     auto_suggest_from_scan: bool | None = None
     cloud_sync_enabled: bool | None = None
@@ -2611,8 +2695,50 @@ def _sum_estimated_comp(scans: list[RvuScan]) -> float:
     return round(sum(_scan_wrvu(scan) * float(scan.cf or APP_CF_DEFAULT) for scan in scans if _is_verified_scan(scan)), 2)
 
 
+def _verified_scans_between(scans: list[RvuScan], start: date, end: date) -> list[RvuScan]:
+    return [
+        scan
+        for scan in scans
+        if _is_verified_scan(scan) and (effective := _effective_scan_date(scan)) and start <= effective <= end
+    ]
+
+
 def _trend_delta(current: float, previous: float) -> float:
     return round(current - previous, 2)
+
+
+def _trend_percent(current: float, previous: float) -> float:
+    if previous <= 0:
+        return 0.0
+    return round(((current - previous) / previous) * 100, 1)
+
+
+def _build_best_day_this_month(scans: list[RvuScan], today: date) -> dict[str, object] | None:
+    month_start = date(today.year, today.month, 1)
+    grouped: dict[date, dict[str, object]] = {}
+    for scan in _verified_scans_between(scans, month_start, today):
+        effective = _effective_scan_date(scan)
+        if effective is None:
+            continue
+        bucket = grouped.setdefault(
+            effective,
+            {
+                "date": effective.isoformat(),
+                "label": effective.strftime("%b %-d"),
+                "cases": 0,
+                "wrvu": 0.0,
+            },
+        )
+        bucket["cases"] = int(bucket["cases"]) + 1
+        bucket["wrvu"] = round(float(bucket["wrvu"]) + _scan_wrvu(scan), 2)
+    if not grouped:
+        return None
+    return max(grouped.values(), key=lambda item: (float(item["wrvu"]), int(item["cases"]), str(item["date"])))
+
+
+def _annualized_run_rate(value: float, start: date, end: date) -> float:
+    elapsed_days = max((end - start).days + 1, 1)
+    return round((value / elapsed_days) * 365, 2)
 
 
 def _build_monthly_trend(scans: list[RvuScan], today: date) -> list[dict[str, object]]:
@@ -2709,6 +2835,8 @@ def staff_patch_settings(
         row.cms_locality_num = body.cms_locality_num.zfill(2)
     if body.cf is not None:
         row.cf = round(float(body.cf), 2)
+    if body.annual_wrvu_goal is not None:
+        row.annual_wrvu_goal = round(max(float(body.annual_wrvu_goal), 0.0), 2)
     if body.show_estimated_dollars is not None:
         row.show_estimated_dollars = body.show_estimated_dollars
     if body.auto_suggest_from_scan is not None:
@@ -2818,16 +2946,18 @@ def staff_stats(
     all_scans = _load_staff_scans(db, surgeon.id)
     today = datetime.now().date()
     start, end, prev_start, prev_end = _period_bounds(range_key, today)
-    period_scans = [
-        scan
-        for scan in all_scans
-        if _is_verified_scan(scan) and (effective := _effective_scan_date(scan)) and start <= effective <= end
-    ]
-    previous_scans = [
-        scan
-        for scan in all_scans
-        if _is_verified_scan(scan) and (effective := _effective_scan_date(scan)) and prev_start <= effective <= prev_end
-    ]
+    period_scans = _verified_scans_between(all_scans, start, end)
+    previous_scans = _verified_scans_between(all_scans, prev_start, prev_end)
+    ytd_start = date(today.year, 1, 1)
+    ytd_scans = _verified_scans_between(all_scans, ytd_start, today)
+    prior_ytd_start = date(today.year - 1, 1, 1)
+    try:
+        prior_ytd_end = date(today.year - 1, today.month, today.day)
+    except ValueError:
+        prior_ytd_end = date(today.year - 1, today.month + 1, 1) - timedelta(days=1)
+    prior_ytd_scans = _verified_scans_between(all_scans, prior_ytd_start, prior_ytd_end)
+    seven_day_scans = _verified_scans_between(all_scans, today - timedelta(days=6), today)
+    thirty_day_scans = _verified_scans_between(all_scans, today - timedelta(days=29), today)
     pending_count = sum(
         1
         for scan in all_scans
@@ -2839,14 +2969,35 @@ def staff_stats(
     wrvu_total = _sum_wrvu(period_scans)
     previous_cases = len(previous_scans)
     previous_wrvu = _sum_wrvu(previous_scans)
+    estimated_compensation = round(wrvu_total * float(settings.cf or APP_CF_DEFAULT), 2)
+    ytd_wrvu = _sum_wrvu(ytd_scans)
+    prior_ytd_wrvu = _sum_wrvu(prior_ytd_scans)
+    annualized_wrvu = _annualized_run_rate(ytd_wrvu, ytd_start, today)
+    annualized_comp = round(annualized_wrvu * float(settings.cf or APP_CF_DEFAULT), 2)
+    annual_goal = float(settings.annual_wrvu_goal or 9000.0)
+    gap_to_goal_wrvu = round(annual_goal - annualized_wrvu, 2)
     return {
         "range": range_key,
         "pending_count": pending_count,
         "cases": cases,
         "wrvu_total": wrvu_total,
-        "estimated_compensation": round(wrvu_total * float(settings.cf or APP_CF_DEFAULT), 2),
+        "estimated_compensation": estimated_compensation,
         "case_delta": _trend_delta(float(cases), float(previous_cases)),
         "wrvu_delta": _trend_delta(wrvu_total, previous_wrvu),
+        "wrvu_delta_percent": _trend_percent(wrvu_total, previous_wrvu),
+        "avg_wrvu_per_case": round(wrvu_total / cases, 2) if cases else 0.0,
+        "avg_comp_per_case": round(estimated_compensation / cases, 2) if cases else 0.0,
+        "annual_wrvu_goal": annual_goal,
+        "annualized_wrvu_run_rate": annualized_wrvu,
+        "annualized_comp_run_rate": annualized_comp,
+        "goal_progress_percent": round((annualized_wrvu / annual_goal) * 100, 1) if annual_goal > 0 else 0.0,
+        "gap_to_goal_wrvu": gap_to_goal_wrvu,
+        "gap_to_goal_comp": round(gap_to_goal_wrvu * float(settings.cf or APP_CF_DEFAULT), 2),
+        "rolling_7_day_avg_wrvu": round(_sum_wrvu(seven_day_scans) / 7, 2),
+        "rolling_30_day_avg_wrvu": round(_sum_wrvu(thirty_day_scans) / 30, 2),
+        "best_day_this_month": _build_best_day_this_month(all_scans, today),
+        "prior_year_delta_wrvu": _trend_delta(ytd_wrvu, prior_ytd_wrvu),
+        "prior_year_delta_percent": _trend_percent(ytd_wrvu, prior_ytd_wrvu),
         "monthly_trend": _build_monthly_trend(all_scans, today),
         "procedure_breakdown": _build_procedure_breakdown(period_scans),
         "setting_breakdown": _build_setting_breakdown(period_scans),
@@ -3354,6 +3505,7 @@ def portal_dashboard(
     group_by: str = "week",
     start: str | None = None,
     end: str | None = None,
+    provider_id: int | None = None,
 ):
     if group_by not in {"day", "week", "month", "quarter"}:
         raise HTTPException(status_code=400, detail="Invalid group_by")
@@ -3373,6 +3525,15 @@ def portal_dashboard(
         .order_by(RvuStaff.last_name, RvuStaff.first_name)
         .all()
     )
+    provider_options = [
+        {
+            "provider_id": staff.id,
+            "provider_name": staff.full_name,
+            "role": _portal_dashboard_role_for_staff(staff),
+            "is_active": bool(staff.is_active),
+        }
+        for staff in staff_rows
+    ]
     provider_map = {
         staff.id: {
             "provider_id": staff.id,
@@ -3388,7 +3549,7 @@ def portal_dashboard(
     }
 
     scan_day_expr = func.date(RvuScan.scanned_at)
-    scan_rows = (
+    scan_query = (
         db.query(
             RvuScan.id,
             RvuScan.surgeon_id,
@@ -3397,6 +3558,7 @@ def portal_dashboard(
             RvuScan.mrn,
             RvuScan.total_rvu,
             RvuScan.total_payment,
+            RvuScan.cf,
             RvuScan.scan_status,
             RvuScan.main_cpt,
             RvuScan.line_items,
@@ -3408,9 +3570,10 @@ def portal_dashboard(
             )
         )
         .filter(RvuScan.scan_status != "pending_processing")
-        .order_by(desc(RvuScan.scanned_at))
-        .all()
     )
+    if provider_id is not None:
+        scan_query = scan_query.filter(RvuScan.surgeon_id == provider_id)
+    scan_rows = scan_query.order_by(desc(RvuScan.scanned_at)).all()
 
     practice = _empty_metric_bucket()
     periods: dict[str, dict] = {}
@@ -3453,12 +3616,15 @@ def portal_dashboard(
         for bucket in (practice, provider["bucket"], period["bucket"], provider_period["bucket"]):
             _add_scan_to_bucket(bucket, row, lines, scan_day)
 
+        if (row.scan_status or "verified") == "pending_review":
+            continue
+
         mrn = str(row.mrn or "").strip()
         patient_key = mrn or f"scan:{row.id}"
         for line in lines:
             cpt = str(line.get("cpt") or line.get("code") or row.main_cpt or "Unknown").strip() or "Unknown"
             wrvu = float(line.get("work_rvu") or line.get("total_rvu") or 0.0)
-            payment = float(line.get("payment") or 0.0)
+            payment = float(line.get("work_payment") if line.get("work_payment") is not None else wrvu * float(row.cf or 32.3465))
             provider["cpts"][cpt] += 1
             entry = cpt_mix.setdefault(cpt, {"cpt": cpt, "count": 0, "patients": set(), "wrvu": 0.0, "est_payment": 0.0, "providers": set()})
             entry["count"] += 1
@@ -3469,7 +3635,7 @@ def portal_dashboard(
 
     provider_rows = []
     for provider in provider_map.values():
-        metrics = _metric_payload(provider["bucket"])
+        metrics = _metric_payload(provider["bucket"], start_date=start_date, end_date=end_date)
         top_cpt = provider["cpts"].most_common(1)
         provider_rows.append({
             "provider_id": provider["provider_id"],
@@ -3484,7 +3650,7 @@ def portal_dashboard(
 
     period_rows = []
     for period in periods.values():
-        period_rows.append({"period_key": period["period_key"], "period_label": period["period_label"], **_metric_payload(period["bucket"])})
+        period_rows.append({"period_key": period["period_key"], "period_label": period["period_label"], **_metric_payload(period["bucket"], start_date=start_date, end_date=end_date)})
     period_rows.sort(key=lambda item: item["period_key"], reverse=True)
 
     provider_period_rows = []
@@ -3494,18 +3660,20 @@ def portal_dashboard(
             "provider_name": item["provider_name"],
             "period_key": item["period_key"],
             "period_label": item["period_label"],
-            **_metric_payload(item["bucket"]),
+            **_metric_payload(item["bucket"], start_date=start_date, end_date=end_date),
         })
     provider_period_rows.sort(key=lambda item: (item["provider_name"], item["period_key"]))
 
     cpt_rows = _cpt_mix_payload(cpt_mix, limit=50)
 
-    practice_metrics = _metric_payload(practice)
+    practice_metrics = _metric_payload(practice, start_date=start_date, end_date=end_date)
     practice_metrics["inactive_scanners"] = sum(1 for row in provider_rows if row["is_active"] and row["scans"] == 0)
 
     return {
         "range": {"key": range_key, "start": start_iso, "end": end_iso, "group_by": group_by},
+        "selected_provider_id": provider_id,
         "practice": practice_metrics,
+        "provider_options": provider_options,
         "providers": provider_rows,
         "periods": period_rows,
         "provider_periods": provider_period_rows,
@@ -3571,9 +3739,10 @@ def portal_dashboard_drilldown(
         provider_key = int(scan.surgeon_id)
         day_key = scan_day.isoformat()
         day_bucket = day_cpt_mix.setdefault(day_key, {})
-        for line in lines:
-            _add_line_to_cpt_mix(cpt_mix, line=line, row=scan, provider_id=provider_key)
-            _add_line_to_cpt_mix(day_bucket, line=line, row=scan, provider_id=provider_key)
+        if (scan.scan_status or "verified") != "pending_review":
+            for line in lines:
+                _add_line_to_cpt_mix(cpt_mix, line=line, row=scan, provider_id=provider_key)
+                _add_line_to_cpt_mix(day_bucket, line=line, row=scan, provider_id=provider_key)
         selected_scans.append((scan, staff, scan_day, lines))
         if len(selected_scans) >= limit:
             break
@@ -3606,7 +3775,7 @@ def portal_dashboard_drilldown(
         "provider_id": provider_id,
         "period_key": period_key,
         "period_label": label,
-        "metrics": _metric_payload(practice),
+        "metrics": _metric_payload(practice, start_date=start_date, end_date=end_date),
         "scans": scan_payload,
         "cpt_mix": _cpt_mix_payload(cpt_mix, limit=200),
         "day_cpt_mix": day_rows,

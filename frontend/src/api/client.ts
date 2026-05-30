@@ -68,8 +68,11 @@ export const api = {
     if (options?.scannedOn) params.set("scanned_on", options.scannedOn);
     return json<PortalScansResponse>(`/api/v1/portal/rvu/scans?${params.toString()}`);
   },
-  portalDashboard: (range = "month", groupBy = "week") =>
-    json<PortalDashboardResponse>(`/api/v1/portal/rvu/dashboard?range=${encodeURIComponent(range)}&group_by=${encodeURIComponent(groupBy)}`),
+  portalDashboard: (range = "month", groupBy = "week", providerId?: number | null) => {
+    const qs = new URLSearchParams({ range, group_by: groupBy });
+    if (providerId != null) qs.set("provider_id", String(providerId));
+    return json<PortalDashboardResponse>(`/api/v1/portal/rvu/dashboard?${qs.toString()}`);
+  },
   portalDashboardDrilldown: (params: { range?: string; groupBy?: string; providerId?: number; periodKey?: string; day?: string; limit?: number }) => {
     const qs = new URLSearchParams({
       range: params.range ?? "month",
@@ -396,14 +399,31 @@ export type PortalScansResponse = {
 export type PortalDashboardMetric = {
   patients: number;
   scans: number;
+  verified_scans: number;
+  case_count: number;
   cpt_lines: number;
   wrvu: number;
   est_payment: number;
   avg_wrvu_per_patient: number;
+  avg_wrvu_per_case: number;
+  avg_payment_per_case: number;
+  annualized_wrvu_run_rate: number;
+  annualized_est_payment_run_rate: number;
+  rolling_7_day_avg_wrvu: number;
+  rolling_30_day_avg_wrvu: number;
+  best_day: PortalDashboardBestDay | null;
   active_scanners: number;
   pending_review: number;
   missing_mrn: number;
   missing_service_date: number;
+};
+
+export type PortalDashboardBestDay = {
+  date: string;
+  wrvu: number;
+  est_payment: number;
+  case_count: number;
+  scans: number;
 };
 
 export type PortalDashboardProvider = PortalDashboardMetric & {
@@ -434,9 +454,18 @@ export type PortalDashboardCpt = {
   providers: number;
 };
 
+export type PortalDashboardProviderOption = {
+  provider_id: number;
+  provider_name: string;
+  role: string | null;
+  is_active: boolean;
+};
+
 export type PortalDashboardResponse = {
   range: { key: string; start: string; end: string; group_by: string };
+  selected_provider_id: number | null;
   practice: PortalDashboardMetric & { inactive_scanners: number };
+  provider_options: PortalDashboardProviderOption[];
   providers: PortalDashboardProvider[];
   periods: PortalDashboardPeriod[];
   provider_periods: PortalDashboardProviderPeriod[];

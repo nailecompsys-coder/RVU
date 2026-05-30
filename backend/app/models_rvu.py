@@ -80,6 +80,7 @@ class RvuUserSettings(Base):
     default_facility = Column(Boolean, nullable=False, default=True)
     cms_locality_num = Column(String(10), nullable=False, default="99")
     cf = Column(Float, nullable=False, default=41.0)
+    annual_wrvu_goal = Column(Float, nullable=False, default=9000.0)
     show_estimated_dollars = Column(Boolean, nullable=False, default=True)
     auto_suggest_from_scan = Column(Boolean, nullable=False, default=True)
     cloud_sync_enabled = Column(Boolean, nullable=False, default=True)
