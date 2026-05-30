@@ -17,13 +17,12 @@ def get_current_staff(
     surgeon_token: str | None = Cookie(default=None),
     db: Session = Depends(get_db),
 ) -> tuple[RvuStaff, RvuStaffDevice]:
-    # Cookie first; fall back to Authorization: Bearer header (needed for iOS
-    # standalone / in-app-browser contexts where httponly cookies are isolated).
-    token = surgeon_token or request.cookies.get("surgeon_token")
+    # Native/mobile clients can carry an old httponly cookie from a prior account.
+    # Prefer the explicit Bearer token when present; browser cookie remains the fallback.
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else None
     if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
+        token = surgeon_token or request.cookies.get("surgeon_token")
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
