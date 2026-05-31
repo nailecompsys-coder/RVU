@@ -93,9 +93,6 @@ export default function PortalLoginPage() {
           </form>
         </div>
 
-        <p className="text-center text-xs text-ink-secondary mt-5">
-          Use your RVU portal username and password (practice managers / office staff).
-        </p>
       </div>
     </div>
   );
