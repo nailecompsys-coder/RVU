@@ -1,7 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
-const HomePage = lazy(() => import("./pages/HomePage"));
 const RegisterPage = lazy(() => import("./pages/RegisterPage"));
 const StaffCapturePage = lazy(() => import("./pages/StaffCapturePage"));
 const StaffHistoryPage = lazy(() => import("./pages/StaffHistoryPage"));
@@ -24,7 +23,7 @@ export default function App() {
   return (
     <Suspense fallback={<RouteFallback />}>
       <Routes>
-        <Route path="/" element={<HomePage />} />
+        <Route path="/" element={<Navigate to="/portal" replace />} />
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/capture" element={<StaffCapturePage />} />
         <Route path="/history" element={<StaffHistoryPage />} />
@@ -32,7 +31,7 @@ export default function App() {
         <Route path="/staff" element={<StaffWorkspacePage />} />
         <Route path="/portal/login" element={<PortalLoginPage />} />
         <Route path="/portal" element={<PortalDashboardPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<Navigate to="/portal" replace />} />
       </Routes>
     </Suspense>
   );
