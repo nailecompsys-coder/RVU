@@ -3805,6 +3805,7 @@ def portal_dashboard_drilldown(
     practice = _empty_metric_bucket()
     cpt_mix: dict[str, dict] = {}
     day_cpt_mix: dict[str, dict[str, dict]] = {}
+    day_groups: dict[str, dict] = {}
     selected_scans: list[tuple[RvuScan, RvuStaff | None, date, list[dict]]] = []
 
     for scan, staff in rows:
@@ -3817,21 +3818,44 @@ def portal_dashboard_drilldown(
         provider_key = int(scan.surgeon_id)
         day_key = scan_day.isoformat()
         day_bucket = day_cpt_mix.setdefault(day_key, {})
+        day_group = day_groups.setdefault(
+            day_key,
+            {
+                "day": day_key,
+                "day_label": scan_day.strftime("%m-%d-%Y"),
+                "bucket": _empty_metric_bucket(),
+                "clinic_count": 0,
+                "facility_count": 0,
+                "scans": [],
+            },
+        )
+        _add_scan_to_bucket(day_group["bucket"], scan, lines, scan_day)
+        if (scan.scan_status or "verified") != "pending_review":
+            if scan.facility:
+                day_group["facility_count"] += 1
+            else:
+                day_group["clinic_count"] += 1
         if (scan.scan_status or "verified") != "pending_review":
             for line in lines:
                 _add_line_to_cpt_mix(cpt_mix, line=line, row=scan, provider_id=provider_key)
                 _add_line_to_cpt_mix(day_bucket, line=line, row=scan, provider_id=provider_key)
-        selected_scans.append((scan, staff, scan_day, lines))
+        selected_item = (scan, staff, scan_day, lines)
+        selected_scans.append(selected_item)
+        day_group["scans"].append(selected_item)
         if len(selected_scans) >= limit:
             break
 
-    scan_payload = []
-    for scan, staff, scan_day, lines in selected_scans:
+    def _drilldown_scan_payload(scan: RvuScan, staff: RvuStaff | None, scan_day: date, lines: list[dict]) -> dict:
         item = _scan_history_dict(scan, staff)
         item["surgeon_id"] = scan.surgeon_id
         item["period_key"], item["period_label"] = _portal_period_key(scan_day, group_by)
         item["scan_day"] = scan_day.isoformat()
         item["cpt_count"] = len(lines)
+        return item
+
+    scan_payload = []
+    for scan, staff, scan_day, lines in selected_scans:
+        item = _drilldown_scan_payload(scan, staff, scan_day, lines)
         scan_payload.append(item)
 
     day_rows = [
@@ -3843,6 +3867,21 @@ def portal_dashboard_drilldown(
         for day_key, mix in day_cpt_mix.items()
     ]
     day_rows.sort(key=lambda item: item["day"], reverse=True)
+    day_group_rows = []
+    for day_key, group in day_groups.items():
+        group_scans = sorted(
+            group["scans"],
+            key=lambda item: item[0].scanned_at or datetime.min,
+        )
+        day_group_rows.append({
+            "day": day_key,
+            "day_label": group["day_label"],
+            "metrics": _metric_payload(group["bucket"], start_date=start_date, end_date=end_date),
+            "clinic_count": int(group["clinic_count"]),
+            "facility_count": int(group["facility_count"]),
+            "scans": [_drilldown_scan_payload(scan, staff, scan_day, lines) for scan, staff, scan_day, lines in group_scans],
+        })
+    day_group_rows.sort(key=lambda item: item["day"])
 
     label = None
     if period_key and selected_scans:
@@ -3855,6 +3894,7 @@ def portal_dashboard_drilldown(
         "period_label": label,
         "metrics": _metric_payload(practice, start_date=start_date, end_date=end_date),
         "scans": scan_payload,
+        "day_groups": day_group_rows,
         "cpt_mix": _cpt_mix_payload(cpt_mix, limit=200),
         "day_cpt_mix": day_rows,
         "limit": limit,

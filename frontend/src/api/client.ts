@@ -484,6 +484,15 @@ export type PortalDashboardDayCptMix = {
   cpt_mix: PortalDashboardCpt[];
 };
 
+export type PortalDashboardDayGroup = {
+  day: string;
+  day_label: string;
+  metrics: PortalDashboardMetric;
+  clinic_count: number;
+  facility_count: number;
+  scans: PortalScanRow[];
+};
+
 export type PortalDashboardDrilldownResponse = {
   range: { key: string; start: string; end: string; group_by: string };
   provider_id: number | null;
@@ -491,6 +500,7 @@ export type PortalDashboardDrilldownResponse = {
   period_label: string | null;
   metrics: PortalDashboardMetric;
   scans: PortalScanRow[];
+  day_groups: PortalDashboardDayGroup[];
   cpt_mix: PortalDashboardCpt[];
   day_cpt_mix: PortalDashboardDayCptMix[];
   limit: number;

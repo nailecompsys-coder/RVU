@@ -7,6 +7,7 @@ import {
   type PortalDashboardDrilldownResponse,
   type PortalDashboardResponse,
   type PortalDashboardProvider,
+  type PortalDashboardDayGroup,
   type ModifierRule,
   type PortalScanAiRun,
   type PortalScanRow,
@@ -21,17 +22,6 @@ import { fmtCalendarDateMdY, fmtDateTimeEt } from "../dates";
 
 type Tab = "scans" | "staff" | "devices" | "opnotes" | "settings";
 const SCAN_PAGE_SIZE = 100;
-type ProviderWeekDayGroup = {
-  dayKey: string;
-  dayLabel: string;
-  scans: PortalScanRow[];
-  patients: number;
-  facilityCases: number;
-  nonFacilityPatients: number;
-  cptLines: number;
-  wrvu: number;
-  payment: number;
-};
 
 const fmt$ = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
@@ -176,24 +166,6 @@ function listFinancialSummary(scan: PortalScanRow): ReturnType<typeof financialB
     assistCount: Number(scan.assist_count ?? 0),
     cptCount: Number(scan.cpt_count ?? 0),
   };
-}
-
-function patientCountForScans(scans: PortalScanRow[]): number {
-  const seen = new Set<string>();
-  scans.forEach((scan) => {
-    const mrn = scan.mrn?.trim();
-    if (mrn) {
-      seen.add(`mrn:${mrn.toLowerCase()}`);
-      return;
-    }
-    const name = scan.patient_name?.trim();
-    if (name) {
-      seen.add(`name:${name.toLowerCase()}:${scan.service_date ?? ""}`);
-      return;
-    }
-    seen.add(`scan:${scan.id}`);
-  });
-  return seen.size;
 }
 
 function prettyJson(value: unknown): string {
@@ -695,41 +667,10 @@ export default function PortalDashboardPage() {
     setSelectedProviderPeriodKey(selectedProviderPeriods[0].period_key);
   }, [selectedProviderId, selectedProviderPeriodKey, selectedProviderPeriods]);
 
-  const providerWeekDayGroups = useMemo<ProviderWeekDayGroup[]>(() => {
-    const grouped = new Map<string, PortalScanRow[]>();
-    (periodDrilldown?.scans ?? []).forEach((scan) => {
-      const key = scan.service_date || "unknown";
-      const dayScans = grouped.get(key);
-      if (dayScans) {
-        dayScans.push(scan);
-      } else {
-        grouped.set(key, [scan]);
-      }
-    });
-
-    return Array.from(grouped.entries())
-      .sort(([a], [b]) => {
-        if (a === "unknown") return 1;
-        if (b === "unknown") return -1;
-        return a.localeCompare(b);
-      })
-      .map(([dayKey, dayScans]) => {
-        const sortedScans = dayScans
-          .slice()
-          .sort((a, b) => String(a.scanned_at ?? "").localeCompare(String(b.scanned_at ?? "")));
-        return {
-          dayKey,
-          dayLabel: dayKey === "unknown" ? "Missing DOS" : fmtCalendarDateMdY(dayKey),
-          scans: sortedScans,
-          patients: patientCountForScans(sortedScans),
-          facilityCases: sortedScans.filter((scan) => scan.facility).length,
-          nonFacilityPatients: sortedScans.filter((scan) => !scan.facility).length,
-          cptLines: sortedScans.reduce((sum, scan) => sum + Number(scan.cpt_count ?? listFinancialSummary(scan).cptCount ?? 0), 0),
-          wrvu: sortedScans.reduce((sum, scan) => sum + Number(listFinancialSummary(scan).workRvu ?? 0), 0),
-          payment: sortedScans.reduce((sum, scan) => sum + Number(listFinancialSummary(scan).surgeonValue ?? 0), 0),
-        };
-      });
-  }, [periodDrilldown]);
+  const providerWeekDayGroups = useMemo<PortalDashboardDayGroup[]>(
+    () => periodDrilldown?.day_groups ?? [],
+    [periodDrilldown],
+  );
 
   const openProviderDashboard = (provider: PortalDashboardProvider) => {
     if (!dashboard) return;
@@ -1628,12 +1569,12 @@ export default function PortalDashboardPage() {
       </div>
 
       {selectedProvider && (
-        <div className="fixed inset-0 z-[190] bg-surface-soft flex flex-col">
-          <div className="h-14 bg-ink text-white px-4 sm:px-6 flex items-center gap-4 shrink-0">
-            <button onClick={closeProviderDashboard} className="btn-secondary text-xs px-3 py-1.5">Back</button>
+        <div className="fixed inset-0 z-[190] bg-surface-soft flex flex-col overflow-hidden">
+          <div className="min-h-14 bg-ink text-white px-3 py-2 sm:px-6 flex items-center gap-3 sm:gap-4 shrink-0">
+            <button onClick={closeProviderDashboard} className="btn-secondary text-xs px-3 py-1.5 shrink-0">Back</button>
             <div className="min-w-0 flex-1">
               <div className="text-base font-black truncate">{selectedProvider.provider_name}</div>
-              <div className="text-[11px] text-white/60 truncate">
+              <div className="text-[11px] text-white/60 leading-snug sm:truncate">
                 {staffRoleLabel(selectedProvider.role)} · {selectedProvider.patients} patients · {selectedProvider.scans} scans · {selectedProvider.wrvu.toFixed(2)} wRVU · {fmt$(selectedProvider.est_payment)}
               </div>
             </div>
@@ -1642,12 +1583,12 @@ export default function PortalDashboardPage() {
             </span>
           </div>
 
-          <div className="grid flex-1 min-h-0 gap-4 p-4 lg:grid-cols-[220px_minmax(0,1fr)_300px]">
+          <div className="grid flex-1 min-h-0 gap-3 overflow-y-auto p-3 sm:p-4 lg:overflow-hidden lg:grid-cols-[220px_minmax(0,1fr)_300px]">
             <div className="card overflow-hidden min-h-0 flex flex-col">
               <div className="px-3 py-2.5 border-b border-brand-border">
                 <h2 className="text-xs font-black uppercase tracking-wide text-ink">Weeks</h2>
               </div>
-              <div className="overflow-auto">
+              <div className="overflow-auto max-h-40 lg:max-h-none">
                 <table className="w-full border-collapse">
                   <tbody>
                     {selectedProviderPeriods.length === 0 && (
@@ -1686,7 +1627,7 @@ export default function PortalDashboardPage() {
                 )}
               </div>
               <div className="overflow-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 900 }}>
+                <table className="w-full border-collapse" style={{ minWidth: 760 }}>
                   <thead>
                     <tr>
                       {["Date/Time", "DOS", "Setting", "Total RVU", "Payment", ""].map((h, i) => (
@@ -1705,16 +1646,16 @@ export default function PortalDashboardPage() {
                       <tr><td colSpan={6} className="px-4 py-5 text-sm text-ink-secondary">No entries.</td></tr>
                     )}
                     {!periodDrilldownLoading && !periodDrilldownErr && providerWeekDayGroups.flatMap((group) => [
-                      <tr key={`provider-day-${group.dayKey}`} className="bg-brand-muted/70 border-y border-brand-border">
+                      <tr key={`provider-day-${group.day}`} className="bg-brand-muted/70 border-y border-brand-border">
                         <td colSpan={6} className="px-3 py-2">
                           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-                            <span className="font-black text-ink">{group.dayLabel}</span>
-                            <span className="font-semibold text-ink-secondary">{group.patients} patients</span>
-                            <span className="font-semibold text-ink-secondary">{group.nonFacilityPatients} clinic/non-fac</span>
-                            <span className="font-semibold text-ink-secondary">{group.facilityCases} facility cases</span>
-                            <span className="font-mono text-ink-secondary">{group.cptLines} CPT lines</span>
-                            <span className="font-mono text-ink-secondary">{group.wrvu.toFixed(2)} wRVU</span>
-                            <span className="font-mono font-bold text-green-700">{fmt$(group.payment)}</span>
+                            <span className="font-black text-ink">{group.day_label}</span>
+                            <span className="font-semibold text-ink-secondary">{group.metrics.patients} patients</span>
+                            <span className="font-semibold text-ink-secondary">{group.clinic_count} clinic/non-fac</span>
+                            <span className="font-semibold text-ink-secondary">{group.facility_count} facility cases</span>
+                            <span className="font-mono text-ink-secondary">{group.metrics.cpt_lines} CPT lines</span>
+                            <span className="font-mono text-ink-secondary">{group.metrics.wrvu.toFixed(2)} wRVU</span>
+                            <span className="font-mono font-bold text-green-700">{fmt$(group.metrics.est_payment)}</span>
                           </div>
                         </td>
                       </tr>,
