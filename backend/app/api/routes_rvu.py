@@ -434,11 +434,13 @@ def _get_or_create_user_settings(db: Session, surgeon_id: int) -> RvuUserSetting
 
 
 def _settings_dict(row: RvuUserSettings) -> dict[str, object]:
+    annual_goal = float(row.annual_wrvu_goal or 9000.0)
     return {
         "default_facility": bool(row.default_facility),
         "cms_locality_num": row.cms_locality_num or "99",
         "cf": float(row.cf or APP_CF_DEFAULT),
-        "annual_wrvu_goal": float(row.annual_wrvu_goal or 9000.0),
+        "annual_wrvu_goal": annual_goal,
+        "monthly_wrvu_goal": round(annual_goal / 12, 2),
         "show_estimated_dollars": bool(row.show_estimated_dollars),
         "auto_suggest_from_scan": bool(row.auto_suggest_from_scan),
         "cloud_sync_enabled": bool(row.cloud_sync_enabled),
@@ -625,6 +627,14 @@ def _effective_rule_inputs(db: Session) -> tuple[set[str], dict[str, object], di
 def _stored_binary_usable(blob: bytes | None, *, min_len: int = 64) -> bool:
     """Avoid treating NULL or empty BYTEA as a real thumbnail."""
     return bool(blob) and len(blob) >= min_len
+
+
+def _charge_scan_images_enabled() -> bool:
+    return os.environ.get("RVU_STORE_CHARGE_IMAGES", "").strip().lower() in ("1", "true", "yes")
+
+
+def _op_note_images_enabled() -> bool:
+    return os.environ.get("RVU_STORE_OP_NOTE_IMAGES", "").strip().lower() in ("1", "true", "yes")
 
 
 def _guess_image_media_type(data: bytes) -> str:
@@ -919,7 +929,7 @@ def _create_pending_scan_stub(
         image_kb,
         0.0,
         line_items_json=json.dumps([]),
-        image_bytes=image_bytes,
+        image_bytes=image_bytes if _charge_scan_images_enabled() else None,
         scan_status="pending_processing",
         main_cpt=None,
         main_cpt_status=None,
@@ -967,6 +977,8 @@ def _apply_pending_scan_result(
     scan.patient_name = (str(cap.get("patient_name") or "").strip() or None)
     scan.mrn = _normalized_mrn_or_none(cap.get("mrn"))
     scan.line_items = json.dumps(enriched)
+    if not _charge_scan_images_enabled():
+        scan.image_data = None
     scan.scan_status = "verified" if verified else "pending_review"
     scan.main_cpt = main_cpt
     scan.main_cpt_status = main_cpt_status
@@ -1033,7 +1045,7 @@ def _persist_capture_result(
         patient_name=cap.get("patient_name"),
         mrn=_normalized_mrn_or_none(cap.get("mrn")),
         line_items_json=json.dumps(enriched),
-        image_bytes=image_bytes,
+        image_bytes=image_bytes if _charge_scan_images_enabled() else None,
         scan_status="pending_review",
         main_cpt=main_cpt,
         main_cpt_status=main_cpt_status,
@@ -1078,7 +1090,7 @@ def _finalize_capture_response(
         response["status_label"] = _scan_status_label(scan)
         response["main_cpt"] = scan.main_cpt
         response["main_cpt_status"] = scan.main_cpt_status
-        response["has_image"] = _stored_binary_usable(scan.image_data)
+        response["has_image"] = _stored_binary_usable(scan.image_data) if _charge_scan_images_enabled() else False
         response["scanned_at"] = _iso_utc(scan.scanned_at)
         response["scanned_at_et"] = _iso_et(scan.scanned_at)
         response["scanned_at_label"] = _label_et(scan.scanned_at)
@@ -1611,7 +1623,6 @@ async def commit_scan(
     synced_commit = _cpts_for_surgeon_lines(enriched) or clean
     sd = payment_svc.parse_service_date(service_date)
 
-    img_bytes: bytes | None = None
     actual_kb = image_kb
     if image and image.filename:
         raw = await image.read()
@@ -1619,13 +1630,11 @@ async def commit_scan(
             raise HTTPException(status_code=413, detail="Image too large (max 10 MB)")
         if len(raw) >= 64:
             try:
-                shrunk, _orig_kb, small_kb = _prepare_uploaded_image(raw)
-                img_bytes = shrunk
+                _shrunk, _orig_kb, small_kb = _prepare_uploaded_image(raw)
                 actual_kb = small_kb
             except HTTPException:
                 raise
             except Exception:
-                img_bytes = raw
                 actual_kb = len(raw) // 1024
 
     scan = payment_svc.save_scan(
@@ -1645,7 +1654,7 @@ async def commit_scan(
         patient_name=patient_name,
         mrn=_normalized_mrn_or_none(mrn),
         line_items_json=json.dumps(enriched),
-        image_bytes=img_bytes,
+        image_bytes=None,
     )
     return {
         "id": scan.id,
@@ -1653,7 +1662,7 @@ async def commit_scan(
         "rows": rows,
         "total_payment": round(total, 2),
         "line_items": enriched,
-        "has_image": img_bytes is not None,
+        "has_image": False,
     }
 
 
@@ -1871,7 +1880,7 @@ async def vision_scan(
             facility=fac,
             cf=cf,
             image_kb=small_kb,
-            image_bytes=image_bytes,
+            image_bytes=image_bytes if _charge_scan_images_enabled() else None,
             client_request_id=client_request_id,
         )
     t_started = datetime.now(timezone.utc)
@@ -1924,7 +1933,7 @@ async def vision_scan(
             modifier_rules=modifier_rules,
         )
         fb_payload["vision_error"] = err_txt
-        rr = f"Vision failed — photo saved; enter CPTs manually. ({err_txt[:140]})"
+        rr = f"Vision failed; enter CPTs manually. Image was not stored. ({err_txt[:140]})"
         saved_scan = _apply_pending_scan_result(
             db=db,
             scan=pending_scan,
@@ -2132,7 +2141,7 @@ async def vision_stream(
                 ai_model=cpt_svc.vision_model,
                 image_kb=small_kb,
                 elapsed=elapsed,
-                image_bytes=image_bytes,
+                image_bytes=image_bytes if _charge_scan_images_enabled() else None,
                 client_request_id=client_request_id,
                 review_reason_override=gate_reason,
             )
@@ -2174,7 +2183,7 @@ def _scan_history_dict(s: RvuScan, surgeon: "RvuStaff | None" = None) -> dict:
         "locality_name": s.locality_name,
         "facility": s.facility,
         "ai_model": s.ai_model,
-        "has_image": _stored_binary_usable(s.image_data),
+        "has_image": _stored_binary_usable(s.image_data) if _charge_scan_images_enabled() else False,
         "scan_status": s.scan_status or "verified",
         "status_label": _scan_status_label(s),
         "main_cpt": s.main_cpt,
@@ -2205,7 +2214,7 @@ def _scan_list_dict(s: RvuScan, surgeon: "RvuStaff | None" = None, has_image: bo
         "locality_name": s.locality_name,
         "facility": s.facility,
         "ai_model": s.ai_model,
-        "has_image": _stored_binary_usable(s.image_data) if has_image is None else has_image,
+        "has_image": (_stored_binary_usable(s.image_data) if has_image is None else has_image) if _charge_scan_images_enabled() else False,
         "scan_status": s.scan_status or "verified",
         "status_label": _scan_status_label(s),
         "main_cpt": s.main_cpt,
@@ -2240,7 +2249,7 @@ def _portal_scan_list_row_dict(row) -> dict:
         "locality_name": row.locality_name,
         "facility": row.facility,
         "ai_model": row.ai_model,
-        "has_image": bool(row.image_bytes),
+        "has_image": bool(row.image_bytes) if _charge_scan_images_enabled() else False,
         "scan_status": row.scan_status or "verified",
         "status_label": _scan_status_label(row),
         "main_cpt": row.main_cpt,
@@ -2573,6 +2582,7 @@ class SettingsBody(BaseModel):
     cms_locality_num: str | None = None
     cf: float | None = None
     annual_wrvu_goal: float | None = None
+    monthly_wrvu_goal: float | None = None
     show_estimated_dollars: bool | None = None
     auto_suggest_from_scan: bool | None = None
     cloud_sync_enabled: bool | None = None
@@ -2621,7 +2631,7 @@ def _op_note_mobile_row(n: RvuOpNote) -> dict[str, object]:
         "image_kb": n.image_kb,
         "ai_model": n.ai_model or "",
         "elapsed_secs": n.elapsed_secs,
-        "has_image": _stored_binary_usable(n.image_data),
+        "has_image": _stored_binary_usable(n.image_data) if _op_note_images_enabled() else False,
     }
 
 
@@ -2936,6 +2946,8 @@ def staff_patch_settings(
         row.cms_locality_num = body.cms_locality_num.zfill(2)
     if body.cf is not None:
         row.cf = round(float(body.cf), 2)
+    if body.monthly_wrvu_goal is not None:
+        row.annual_wrvu_goal = round(max(float(body.monthly_wrvu_goal), 0.0) * 12, 2)
     if body.annual_wrvu_goal is not None:
         row.annual_wrvu_goal = round(max(float(body.annual_wrvu_goal), 0.0), 2)
     if body.show_estimated_dollars is not None:
@@ -3051,6 +3063,11 @@ def staff_stats(
     previous_scans = _verified_scans_between(all_scans, prev_start, prev_end)
     ytd_start = date(today.year, 1, 1)
     ytd_scans = _verified_scans_between(all_scans, ytd_start, today)
+    month_start = date(today.year, today.month, 1)
+    next_month_start = date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
+    days_in_month = (next_month_start - month_start).days
+    elapsed_days_this_month = max(today.day, 1)
+    month_to_date_scans = _verified_scans_between(all_scans, month_start, today)
     prior_ytd_start = date(today.year - 1, 1, 1)
     try:
         prior_ytd_end = date(today.year - 1, today.month, today.day)
@@ -3085,6 +3102,10 @@ def staff_stats(
     annualized_wrvu = _annualized_run_rate(ytd_wrvu, ytd_start, today)
     annualized_comp = _annualized_run_rate(ytd_comp, ytd_start, today)
     annual_goal = float(settings.annual_wrvu_goal or 9000.0)
+    monthly_goal = round(annual_goal / 12, 2)
+    month_to_date_wrvu = _sum_wrvu(month_to_date_scans)
+    projected_month_end_wrvu = round((month_to_date_wrvu / elapsed_days_this_month) * days_in_month, 2) if elapsed_days_this_month else 0.0
+    monthly_gap_wrvu = round(monthly_goal - month_to_date_wrvu, 2)
     gap_to_goal_wrvu = round(annual_goal - annualized_wrvu, 2)
     seven_day_wrvu = _sum_wrvu(seven_day_scans)
     previous_seven_day_wrvu = _sum_wrvu(previous_seven_day_scans)
@@ -3102,6 +3123,13 @@ def staff_stats(
         "avg_wrvu_per_case": round(wrvu_total / cases, 2) if cases else 0.0,
         "avg_comp_per_case": round(estimated_compensation / cases, 2) if cases else 0.0,
         "annual_wrvu_goal": annual_goal,
+        "monthly_wrvu_goal": monthly_goal,
+        "month_to_date_wrvu": month_to_date_wrvu,
+        "monthly_goal_progress_percent": round((month_to_date_wrvu / monthly_goal) * 100, 1) if monthly_goal > 0 else 0.0,
+        "monthly_gap_wrvu": monthly_gap_wrvu,
+        "monthly_gap_comp": round(monthly_gap_wrvu * cf, 2),
+        "projected_month_end_wrvu": projected_month_end_wrvu,
+        "projected_month_end_comp": round(projected_month_end_wrvu * cf, 2),
         "annualized_wrvu_run_rate": annualized_wrvu,
         "annualized_comp_run_rate": annualized_comp,
         "goal_progress_percent": round((annualized_wrvu / annual_goal) * 100, 1) if annual_goal > 0 else 0.0,
@@ -3335,6 +3363,8 @@ def get_scan_image(
     auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     """Return the original scan image for a surgeon's own scan."""
+    if not _charge_scan_images_enabled():
+        raise HTTPException(status_code=404, detail="Scan image storage is disabled")
     surgeon, _ = auth
     scan = db.query(RvuScan).filter(
         RvuScan.id == scan_id, RvuScan.surgeon_id == surgeon.id,
@@ -3433,7 +3463,7 @@ def _op_note_dict(n: RvuOpNote, surgeon_name: str | None) -> dict:
         "extracted_text": (n.extracted_text or "")[:20000],
         "ai_model": n.ai_model,
         "elapsed_secs": n.elapsed_secs,
-        "has_image": _stored_binary_usable(n.image_data),
+        "has_image": _stored_binary_usable(n.image_data) if _op_note_images_enabled() else False,
     }
 
 
@@ -3444,7 +3474,7 @@ async def staff_upload_op_note(
     auth: tuple[RvuStaff, object] = Depends(get_current_staff),
     rvu_request_id: str | None = Header(None, alias="X-RVU-Request-Id"),
 ):
-    """Snap an operative note; vision model transcribes text and stores image + text for the portal."""
+    """Snap an operative note; vision model transcribes text and stores text only by default."""
     surgeon, _ = auth
     wall_start_s = time.monotonic()
     _rid = (rvu_request_id or "-")[:64]
@@ -3461,7 +3491,7 @@ async def staff_upload_op_note(
     kb = max(1, len(small) // 1024)
     note = RvuOpNote(
         surgeon_id=surgeon.id,
-        image_data=small,
+        image_data=small if _op_note_images_enabled() else None,
         image_kb=kb,
         extracted_text=text or None,
         ai_model=model,
@@ -3529,6 +3559,8 @@ def staff_get_op_note_image(
     db: Session = Depends(get_db),
     auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
+    if not _op_note_images_enabled():
+        raise HTTPException(status_code=404, detail="Op note image storage is disabled")
     surgeon, _ = auth
     note = db.get(RvuOpNote, note_id)
     if not note or note.surgeon_id != surgeon.id:
@@ -4061,6 +4093,8 @@ def portal_scan_image(
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin_api),
 ):
+    if not _charge_scan_images_enabled():
+        raise HTTPException(status_code=404, detail="Scan image storage is disabled")
     scan = db.get(RvuScan, scan_id)
     if not scan or not _stored_binary_usable(scan.image_data):
         raise HTTPException(status_code=404, detail="No image for this scan")
@@ -4233,6 +4267,8 @@ def portal_op_note_image(
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin_api),
 ):
+    if not _op_note_images_enabled():
+        raise HTTPException(status_code=404, detail="Op note image storage is disabled")
     note = db.get(RvuOpNote, note_id)
     if not note or not _stored_binary_usable(note.image_data):
         raise HTTPException(status_code=404, detail="No image for this note")
