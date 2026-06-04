@@ -287,6 +287,15 @@ def _scan_wrvu(scan: RvuScan) -> float:
     return round(float(scan.total_rvu or 0.0), 2)
 
 
+def _scan_work_payment(scan: RvuScan, cf: float | None = None) -> float:
+    line_items = _primary_line_items(_parse_line_items(scan.line_items))
+    if line_items:
+        has_work_payment = any(item.get("work_payment") is not None for item in line_items)
+        if has_work_payment:
+            return round(sum(float(item.get("work_payment") or 0.0) for item in line_items), 2)
+    return round(_scan_wrvu(scan) * float(cf or scan.cf or APP_CF_DEFAULT), 2)
+
+
 def _review_reason_from_scan_fields(
     *,
     main_cpt: str | None,
@@ -2758,7 +2767,11 @@ def _filter_scans_by_work_type(scans: list[RvuScan], work_type: str) -> list[Rvu
 
 
 def _sum_estimated_comp(scans: list[RvuScan]) -> float:
-    return round(sum(_scan_wrvu(scan) * float(scan.cf or APP_CF_DEFAULT) for scan in scans if _is_verified_scan(scan)), 2)
+    return round(sum(_scan_work_payment(scan) for scan in scans if _is_verified_scan(scan)), 2)
+
+
+def _sum_surgeon_value(scans: list[RvuScan], cf: float | None = None) -> float:
+    return round(sum(_scan_work_payment(scan, cf) for scan in scans if _is_verified_scan(scan)), 2)
 
 
 def _verified_scans_between(scans: list[RvuScan], start: date, end: date) -> list[RvuScan]:
@@ -2855,15 +2868,35 @@ def _build_procedure_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
                     "description": str(item.get("procedure_name") or "").strip(),
                     "count": 0,
                     "wrvu": 0.0,
+                    "est_payment": 0.0,
                 },
             )
             if not bucket["description"]:
                 bucket["description"] = str(item.get("procedure_name") or "").strip()
+            wrvu = float(item.get("work_rvu") or item.get("total_rvu") or 0.0)
             bucket["count"] = int(bucket["count"]) + 1
-            bucket["wrvu"] = round(float(bucket["wrvu"]) + float(item.get("work_rvu") or item.get("total_rvu") or 0.0), 2)
+            bucket["wrvu"] = round(float(bucket["wrvu"]) + wrvu, 2)
+            bucket["est_payment"] = round(
+                float(bucket["est_payment"])
+                + float(item.get("work_payment") if item.get("work_payment") is not None else wrvu * float(scan.cf or APP_CF_DEFAULT)),
+                2,
+            )
     rows = list(grouped.values())
     rows.sort(key=lambda item: (-float(item["wrvu"]), -int(item["count"]), str(item["cpt"])))
     return rows[:10]
+
+
+def _build_top_cpt_contribution(scans: list[RvuScan], *, total_payment: float | None = None, limit: int = 3) -> list[dict[str, object]]:
+    rows = _build_procedure_breakdown(scans)
+    denominator = total_payment if total_payment is not None else sum(float(row.get("est_payment") or 0.0) for row in rows)
+    top_rows = sorted(rows, key=lambda item: (-float(item.get("est_payment") or 0.0), -float(item.get("wrvu") or 0.0), str(item.get("cpt") or "")))[:limit]
+    return [
+        {
+            **row,
+            "revenue_percent": round((float(row.get("est_payment") or 0.0) / denominator) * 100, 1) if denominator and denominator > 0 else 0.0,
+        }
+        for row in top_rows
+    ]
 
 
 def _build_setting_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
@@ -3025,7 +3058,9 @@ def staff_stats(
         prior_ytd_end = date(today.year - 1, today.month + 1, 1) - timedelta(days=1)
     prior_ytd_scans = _verified_scans_between(all_scans, prior_ytd_start, prior_ytd_end)
     seven_day_scans = _verified_scans_between(all_scans, today - timedelta(days=6), today)
+    previous_seven_day_scans = _verified_scans_between(all_scans, today - timedelta(days=13), today - timedelta(days=7))
     thirty_day_scans = _verified_scans_between(all_scans, today - timedelta(days=29), today)
+    twenty_eight_day_scans = _verified_scans_between(all_scans, today - timedelta(days=27), today)
     seven_day_surgical_scans = _filter_scans_by_work_type(seven_day_scans, "surgical")
     thirty_day_surgical_scans = _filter_scans_by_work_type(thirty_day_scans, "surgical")
     seven_day_clinic_scans = _filter_scans_by_work_type(seven_day_scans, "clinic")
@@ -3041,13 +3076,20 @@ def staff_stats(
     wrvu_total = _sum_wrvu(period_scans)
     previous_cases = len(previous_scans)
     previous_wrvu = _sum_wrvu(previous_scans)
-    estimated_compensation = round(wrvu_total * float(settings.cf or APP_CF_DEFAULT), 2)
+    cf = float(settings.cf or APP_CF_DEFAULT)
+    estimated_compensation = _sum_surgeon_value(period_scans, cf)
     ytd_wrvu = _sum_wrvu(ytd_scans)
+    ytd_comp = _sum_surgeon_value(ytd_scans, cf)
     prior_ytd_wrvu = _sum_wrvu(prior_ytd_scans)
+    prior_ytd_comp = _sum_surgeon_value(prior_ytd_scans, cf)
     annualized_wrvu = _annualized_run_rate(ytd_wrvu, ytd_start, today)
-    annualized_comp = round(annualized_wrvu * float(settings.cf or APP_CF_DEFAULT), 2)
+    annualized_comp = _annualized_run_rate(ytd_comp, ytd_start, today)
     annual_goal = float(settings.annual_wrvu_goal or 9000.0)
     gap_to_goal_wrvu = round(annual_goal - annualized_wrvu, 2)
+    seven_day_wrvu = _sum_wrvu(seven_day_scans)
+    previous_seven_day_wrvu = _sum_wrvu(previous_seven_day_scans)
+    procedure_breakdown = _build_procedure_breakdown(period_scans)
+    top_cpts = _build_top_cpt_contribution(period_scans, total_payment=estimated_compensation, limit=3)
     return {
         "range": range_key,
         "pending_count": pending_count,
@@ -3064,8 +3106,13 @@ def staff_stats(
         "annualized_comp_run_rate": annualized_comp,
         "goal_progress_percent": round((annualized_wrvu / annual_goal) * 100, 1) if annual_goal > 0 else 0.0,
         "gap_to_goal_wrvu": gap_to_goal_wrvu,
-        "gap_to_goal_comp": round(gap_to_goal_wrvu * float(settings.cf or APP_CF_DEFAULT), 2),
-        "rolling_7_day_avg_wrvu": round(_sum_wrvu(seven_day_scans) / 7, 2),
+        "gap_to_goal_comp": round(gap_to_goal_wrvu * cf, 2),
+        "prior_year_delta_comp": _trend_delta(ytd_comp, prior_ytd_comp),
+        "weekly_trend_direction": "up" if seven_day_wrvu > previous_seven_day_wrvu else "down" if seven_day_wrvu < previous_seven_day_wrvu else "flat",
+        "four_week_moving_avg_wrvu": round(_sum_wrvu(twenty_eight_day_scans) / 4, 2),
+        "top_cpt_revenue_percent": top_cpts[0]["revenue_percent"] if top_cpts else 0.0,
+        "top_3_cpts_by_contribution": top_cpts,
+        "rolling_7_day_avg_wrvu": round(seven_day_wrvu / 7, 2),
         "rolling_30_day_avg_wrvu": round(_sum_wrvu(thirty_day_scans) / 30, 2),
         "rolling_7_day_surgical_avg_wrvu": round(_sum_wrvu(seven_day_surgical_scans) / 7, 2),
         "rolling_30_day_surgical_avg_wrvu": round(_sum_wrvu(thirty_day_surgical_scans) / 30, 2),
@@ -3077,7 +3124,7 @@ def staff_stats(
         "prior_year_delta_wrvu": _trend_delta(ytd_wrvu, prior_ytd_wrvu),
         "prior_year_delta_percent": _trend_percent(ytd_wrvu, prior_ytd_wrvu),
         "monthly_trend": _build_monthly_trend(all_scans, today),
-        "procedure_breakdown": _build_procedure_breakdown(period_scans),
+        "procedure_breakdown": procedure_breakdown,
         "setting_breakdown": _build_setting_breakdown(period_scans),
     }
 

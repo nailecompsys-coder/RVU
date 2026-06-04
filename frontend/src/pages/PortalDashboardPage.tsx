@@ -80,6 +80,12 @@ function DetailMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function trendLabel(value: number): string {
+  if (value > 0) return `+${value.toFixed(2)} wRVU vs prior`;
+  if (value < 0) return `${value.toFixed(2)} wRVU vs prior`;
+  return "Flat vs prior";
+}
+
 // ── Table shared styles ────────────────────────────────────────────────────────
 const TH = "px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-ink-secondary whitespace-nowrap border-b-2 border-brand-border bg-surface-soft text-left";
 const TD = "px-3 py-2.5 text-sm border-b border-brand-border/60 align-top";
@@ -894,19 +900,19 @@ export default function PortalDashboardPage() {
               <div className="space-y-4 mb-6 order-2">
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                   <div className="card p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Annualized wRVU Run Rate</div>
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Annualized Run Rate</div>
                     <div className="mt-2 text-2xl font-black text-ink tabular-nums">
                       {dashboard.practice.annualized_wrvu_run_rate.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                     </div>
                     <div className="mt-1 text-xs text-ink-secondary">
-                      {fmtCompact$(dashboard.practice.annualized_est_payment_run_rate)} annualized surgeon value
+                      {fmtCompact$(dashboard.practice.annualized_est_payment_run_rate)} est. compensation
                     </div>
                   </div>
                   <div className="card p-4">
-                    <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Current Period</div>
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-ink-secondary">Current Period wRVU</div>
                     <div className="mt-2 text-2xl font-black text-ink tabular-nums">{dashboard.practice.wrvu.toFixed(2)}</div>
                     <div className="mt-1 text-xs text-ink-secondary">
-                      {dashboard.practice.case_count} verified case{dashboard.practice.case_count === 1 ? "" : "s"} · {fmt$(dashboard.practice.est_payment)}
+                      {dashboard.practice.case_count} verified case{dashboard.practice.case_count === 1 ? "" : "s"} · {fmt$(dashboard.practice.est_payment)} est. compensation
                     </div>
                   </div>
                   <div className="card p-4">
@@ -931,9 +937,11 @@ export default function PortalDashboardPage() {
                     )}
                   </div>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-3">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
                   <DetailMetric label="7-day avg wRVU" value={dashboard.practice.rolling_7_day_avg_wrvu.toFixed(2)} />
                   <DetailMetric label="30-day avg wRVU" value={dashboard.practice.rolling_30_day_avg_wrvu.toFixed(2)} />
+                  <DetailMetric label="Annualized $" value={fmtCompact$(dashboard.practice.annualized_est_payment_run_rate)} />
+                  <DetailMetric label="Prior period" value={trendLabel(dashboard.practice.wrvu - (dashboard.periods[1]?.wrvu ?? dashboard.practice.wrvu))} />
                   <DetailMetric label="Pending review" value={`${dashboard.practice.pending_review}`} />
                 </div>
                 <div className="grid gap-4">
@@ -945,7 +953,7 @@ export default function PortalDashboardPage() {
                       <table className="w-full border-collapse" style={{ minWidth: 900 }}>
                         <thead>
                           <tr>
-                            {["Provider", "Role", "Patients", "Cases", "CPTs", "wRVU", "Est. $", "Avg / Case", "Pending", "Last Scan"].map((h, i) => (
+                            {["Provider", "Role", "Patients", "Cases", "CPTs", "wRVU", "Est. Comp", "Avg / Case", "Pending", "Last Scan"].map((h, i) => (
                               <th key={h} className={`${TH} ${i >= 2 && i <= 8 ? "text-right" : "text-left"}`}>{h}</th>
                             ))}
                           </tr>
