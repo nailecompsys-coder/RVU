@@ -49,8 +49,8 @@ def _resolve_modifier(
     modifier_rules: dict[str, dict[str, object]] | None = None,
 ) -> tuple[str, float, str]:
     """
-    Parse a modifier string like "50", "AS", or "LT,50" and return
-    the first payment-affecting modifier as (code, factor, description).
+    Parse a modifier string like "50", "AS", or "AS,50" and return the
+    combined modifier effect as (codes, factor, descriptions).
     """
     if not modifier_str:
         return "", 1.0, ""
@@ -58,18 +58,20 @@ def _resolve_modifier(
         code: {"factor": factor, "desc": DEFAULT_MODIFIER_DESC.get(code, code)}
         for code, factor in DEFAULT_MODIFIER_FACTORS.items()
     }
-    codes = [
-        re.sub(r"[^A-Z0-9]", "", c.strip().upper())
-        for c in modifier_str.replace("/", ",").split(",")
-        if c.strip()
-    ]
+    codes = _normalize_modifier_str(modifier_str).split(",")
+    matched_codes: list[str] = []
+    descriptions: list[str] = []
+    factor = 1.0
     for code in codes:
         if code in effective_rules:
             rule = effective_rules.get(code) or {}
-            factor = float(rule.get("factor") or 1.0)
+            factor *= float(rule.get("factor") or 1.0)
             desc = str(rule.get("desc") or code)
-            return code, factor, desc
-    return "", 1.0, ""
+            matched_codes.append(code)
+            descriptions.append(desc)
+    if not matched_codes:
+        return "", 1.0, ""
+    return ",".join(matched_codes), factor, "; ".join(descriptions)
 
 
 def _normalize_modifier_str(modifier_str: str) -> str:

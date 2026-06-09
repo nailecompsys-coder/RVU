@@ -99,7 +99,7 @@ class RvuPaymentService:
             modifier = _normalize_modifier_text(str(line.get("modifier") or ""))
             role = str(line.get("provider_role") or "").strip().lower()
             is_assist = bool(line.get("is_assist")) or role in ("pa", "assistant") or "AS" in modifier
-            if is_assist:
+            if is_assist and "AS" not in modifier:
                 continue
             r = calc_payment(
                 cpt,
