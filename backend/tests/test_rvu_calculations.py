@@ -63,6 +63,50 @@ class RvuCalculationTests(unittest.TestCase):
         self.assertEqual(rows[0]["work_rvu"], 2.79)
         self.assertEqual(total, 114.39)
 
+    def test_enriched_manual_modifier_line_keeps_calculated_payment(self):
+        svc = RvuPaymentService()
+        lines = [
+            {
+                "cpt": "49650",
+                "modifier": "50",
+                "provider_role": "surgeon",
+                "provider_name": "Chris Johnson",
+                "line_service_date": "2026-06-11",
+            }
+        ]
+
+        rows, _ = svc.build_rows_from_lines(lines, "99", True, 41.0)
+        enriched = svc.enrich_line_items(rows, lines)
+
+        self.assertEqual(len(enriched), 1)
+        self.assertEqual(enriched[0]["modifier"], "50")
+        self.assertEqual(enriched[0]["provider_name"], "Chris Johnson")
+        self.assertFalse(enriched[0]["is_assist"])
+        self.assertEqual(enriched[0]["payment"], 571.95)
+
+    def test_enriched_manual_multi_modifier_pa_line_is_not_duplicated(self):
+        svc = RvuPaymentService()
+        lines = [
+            {
+                "cpt": "49650",
+                "modifier": "AS,50",
+                "provider_role": "pa",
+                "provider_name": "Lucy Woodley",
+                "line_service_date": "2026-06-11",
+            }
+        ]
+
+        rows, total = svc.build_rows_from_lines(lines, "99", True, 41.0)
+        enriched = svc.enrich_line_items(rows, lines)
+
+        self.assertEqual(total, 114.39)
+        self.assertEqual(len(enriched), 1)
+        self.assertEqual(enriched[0]["modifier"], "AS,50")
+        self.assertEqual(enriched[0]["provider_name"], "Lucy Woodley")
+        self.assertEqual(enriched[0]["provider_role"], "pa")
+        self.assertTrue(enriched[0]["is_assist"])
+        self.assertEqual(enriched[0]["payment"], 114.39)
+
     def test_alphanumeric_modifier_rule_is_supported(self):
         row = calc_payment(
             "27871",

@@ -162,6 +162,7 @@ class RvuPaymentService:
         fallback_surgeon_name = ""
         explicit_assist_cpts: set[str] = set()
         ocr_primary_queue: list[dict[str, Any]] = []
+        line_meta_queue: list[dict[str, Any]] = []
         if lines:
             for L in lines:
                 if not isinstance(L, dict):
@@ -172,11 +173,32 @@ class RvuPaymentService:
                     if proc:
                         name_by_cpt[cpt] = proc
                     role = str(L.get("provider_role") or "").strip().lower()
-                    modifier = str(L.get("modifier") or "").strip().upper()
+                    modifier = _normalize_modifier_text(str(L.get("modifier") or ""))
                     is_assist = bool(L.get("is_assist")) or role in ("pa", "assistant") or "AS" in modifier
                     pname = _clean_provider_name(str(L.get("provider_name") or "").strip())
                     if is_assist:
                         explicit_assist_cpts.add(cpt)
+                    line_sd = None
+                    for key in ("line_service_date", "service_date", "dos", "date_of_service", "charge_date"):
+                        v = L.get(key)
+                        if v:
+                            line_sd = RvuPaymentService.coerce_service_date_iso(str(v))
+                            if line_sd:
+                                break
+                    line_meta_queue.append(
+                        {
+                            "cpt": cpt,
+                            "provider_name": pname,
+                            "provider_role": role if role in ("pa", "assistant", "surgeon") else "unknown",
+                            "modifier": modifier,
+                            "is_assist": is_assist,
+                            "line_service_date": line_sd,
+                            "line_service_datetime_raw": str(L.get("line_service_datetime_raw") or "").strip(),
+                            "line_service_time_raw": str(L.get("line_service_time_raw") or "").strip(),
+                            "quantity": L.get("quantity"),
+                            "raw_row_text": str(L.get("raw_row_text") or "").strip(),
+                        }
+                    )
                     if not is_assist:
                         # Keep surgeon modifiers but strip AS token if OCR noise includes it.
                         mod_parts = [p.strip() for p in modifier.split(",") if p.strip()]
@@ -189,13 +211,6 @@ class RvuPaymentService:
                         }
                         if pname and not fallback_surgeon_name:
                             fallback_surgeon_name = pname
-                        line_sd = None
-                        for key in ("line_service_date", "service_date", "dos", "date_of_service", "charge_date"):
-                            v = L.get(key)
-                            if v:
-                                line_sd = RvuPaymentService.coerce_service_date_iso(str(v))
-                                if line_sd:
-                                    break
                         ocr_primary_queue.append(
                             {
                                 "cpt": cpt,
@@ -215,8 +230,10 @@ class RvuPaymentService:
             for row in rows
             if str(row.get("cpt") or "").strip()
         }
+        paid_assist_mod_keys: set[tuple[str, str]] = set()
         for row in rows:
             cpt = row.get("cpt", "")
+            row_modifier = _normalize_modifier_text(str(row.get("modifier") or ""))
             proc = name_by_cpt.get(cpt, "") or str(row.get("desc") or "")
             meta = primary_meta_by_cpt.get(cpt, {})
             picked: dict[str, Any] | None = None
@@ -224,6 +241,18 @@ class RvuPaymentService:
                 if item.get("cpt") == cpt:
                     picked = ocr_primary_queue.pop(i)
                     break
+            if picked is None:
+                fallback_index: int | None = None
+                for i, item in enumerate(line_meta_queue):
+                    if item.get("cpt") != cpt:
+                        continue
+                    if str(item.get("modifier") or "") == row_modifier:
+                        fallback_index = i
+                        break
+                    if fallback_index is None:
+                        fallback_index = i
+                if fallback_index is not None:
+                    picked = line_meta_queue.pop(fallback_index)
             if picked is not None:
                 pname = str(picked.get("provider_name") or "") or fallback_surgeon_name
                 prole = str(picked.get("provider_role") or "surgeon") or "surgeon"
@@ -242,6 +271,7 @@ class RvuPaymentService:
                 line_time_raw = ""
                 quantity = None
                 raw_row_text = ""
+            is_assist_row = bool(picked and picked.get("is_assist")) or "AS" in (pmod or row_modifier).split(",")
             out_line: dict[str, Any] = {
                 "cpt": cpt,
                 "procedure_name": proc,
@@ -252,7 +282,7 @@ class RvuPaymentService:
                 "modifier_factor": row.get("modifier_factor", 1.0),
                 "modifier_desc": row.get("modifier_desc", ""),
                 "multiple_procedure_factor": row.get("multiple_procedure_factor", 1.0),
-                "is_assist": False,
+                "is_assist": is_assist_row,
                 "work_rvu": row.get("work_rvu"),
                 "pe_rvu": row.get("pe_rvu"),
                 "pe_nonfac_rvu": row.get("pe_nonfac_rvu"),
@@ -278,6 +308,8 @@ class RvuPaymentService:
             if raw_row_text:
                 out_line["raw_row_text"] = raw_row_text
             out.append(out_line)
+            if is_assist_row:
+                paid_assist_mod_keys.add((str(cpt), _normalize_modifier_text(str(out_line.get("modifier") or ""))))
         # Keep assistant/PA lines from OCR/text for auditing, but do not add to surgeon payment totals.
         if lines:
             for L in lines:
@@ -287,8 +319,11 @@ class RvuPaymentService:
                 if not re.fullmatch(r"\d{5}", cpt):
                     continue
                 role = str(L.get("provider_role") or "unknown").strip().lower()
-                is_assist = bool(L.get("is_assist")) or role in ("pa", "assistant") or "AS" in str(L.get("modifier") or "").upper()
+                line_modifier = _normalize_modifier_text(str(L.get("modifier") or ""))
+                is_assist = bool(L.get("is_assist")) or role in ("pa", "assistant") or "AS" in line_modifier
                 if not is_assist:
+                    continue
+                if (cpt, line_modifier) in paid_assist_mod_keys:
                     continue
                 assist_sd = None
                 for key in ("line_service_date", "service_date", "dos", "date_of_service", "charge_date"):
@@ -302,7 +337,7 @@ class RvuPaymentService:
                     "procedure_name": str(L.get("procedure_name") or "").strip(),
                     "provider_name": _clean_provider_name(str(L.get("provider_name") or "").strip()),
                     "provider_role": role if role in ("pa", "assistant", "surgeon") else "unknown",
-                    "modifier": str(L.get("modifier") or "").strip().upper(),
+                    "modifier": line_modifier,
                     "is_assist": True,
                     "work_rvu": round(float((row_lookup.get(cpt) or {}).get("work_rvu") or 0) * 0.2, 2),
                     "total_rvu": round(float((row_lookup.get(cpt) or {}).get("work_rvu") or 0) * 0.2, 2),
