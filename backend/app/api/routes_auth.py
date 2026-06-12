@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth import (
@@ -142,7 +143,7 @@ def staff_request_otp(body: StaffOtpRequestBody, db: Session = Depends(get_db)):
     email = _normalize_email(body.email)
     surgeon = (
         db.query(RvuStaff)
-        .filter(RvuStaff.email == email, RvuStaff.is_active == True)  # noqa: E712
+        .filter(func.lower(RvuStaff.email) == email, RvuStaff.is_active == True)  # noqa: E712
         .first()
     )
     dev_code = None
