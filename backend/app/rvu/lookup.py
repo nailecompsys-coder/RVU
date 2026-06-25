@@ -149,7 +149,7 @@ class PaymentResult:
 
 
 @lru_cache(maxsize=1)
-def _rvu_table() -> dict[str, RvuRow]:
+def _cms_rvu_table() -> dict[str, RvuRow]:
     table: dict[str, RvuRow] = {}
     with open(_DATA / "cpt_rvu_full.csv", newline="") as f:
         for row in csv.DictReader(f):
@@ -160,6 +160,12 @@ def _rvu_table() -> dict[str, RvuRow]:
                 pe_fac_rvu=float(row["pe_fac_rvu"] or 0),
                 mp_rvu=float(row["mp_rvu"] or 0),
             )
+    return table
+
+
+@lru_cache(maxsize=1)
+def _rvu_table() -> dict[str, RvuRow]:
+    table = dict(_cms_rvu_table())
     table.update(COMMERCIAL_CONSULT_OVERRIDES)
     table.update(PRACTICE_RVU_OVERRIDES)
     return table
@@ -200,6 +206,10 @@ def get_rvu(cpt: str) -> RvuRow:
 
 def get_rvu_catalog() -> dict[str, RvuRow]:
     return dict(_rvu_table())
+
+
+def get_base_rvu_catalog() -> dict[str, RvuRow]:
+    return dict(_cms_rvu_table())
 
 
 def calc_payment(

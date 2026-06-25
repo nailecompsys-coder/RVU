@@ -36,6 +36,8 @@ from app.services.rvu_goal_service import (
 from app.services.rvu_payment_service import RvuPaymentService
 from app.services.rvu_retention_policy import charge_scan_images_enabled, op_note_images_enabled
 from app.services.rvu_rules_service import (
+    delete_cpt_rule,
+    get_effective_cpt_catalog,
     get_effective_modifier_rules,
     get_effective_rvu_overrides,
     get_recognized_cpts,
@@ -43,6 +45,7 @@ from app.services.rvu_rules_service import (
     list_modifier_rules,
     patch_cpt_rule,
     patch_modifier_rule,
+    save_cpt_rule,
 )
 
 from .deps import get_current_staff
@@ -547,6 +550,7 @@ def _preview_from_capture(
     *,
     cpt_overrides=None,
     modifier_rules=None,
+    cpt_catalog=None,
 ) -> dict:
     cpts = cap.get("cpts") or []
     base = {
@@ -569,6 +573,7 @@ def _preview_from_capture(
             cf,
             cpt_overrides=cpt_overrides,
             modifier_rules=modifier_rules,
+            cpt_catalog=cpt_catalog,
         )
     else:
         modifiers = _extract_modifiers(lines)
@@ -580,6 +585,7 @@ def _preview_from_capture(
             modifiers=modifiers,
             cpt_overrides=cpt_overrides,
             modifier_rules=modifier_rules,
+            cpt_catalog=cpt_catalog,
         )
     return {**base, "rows": rows, "total_payment": round(total, 2)}
 
@@ -623,11 +629,15 @@ def _apply_clinician_capture_fields(
     return out
 
 
-def _effective_rule_inputs(db: Session) -> tuple[set[str], dict[str, object], dict[str, dict[str, object]]]:
+def _effective_rule_inputs(
+    db: Session,
+) -> tuple[set[str], dict[str, object], dict[str, dict[str, object]], dict[str, dict[str, object]]]:
+    catalog = get_effective_cpt_catalog(db)
     return (
         get_recognized_cpts(db),
         get_effective_rvu_overrides(db),
         get_effective_modifier_rules(db),
+        catalog,
     )
 
 
@@ -829,7 +839,7 @@ def _maybe_fanout_charge_capture_for_other_surgeons(
             continue
         mods = _extract_modifiers(subset)
         try:
-            _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+            _, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
             rows, total = payment_svc.build_rows(
                 clean,
                 scan.locality_num or "00",
@@ -838,6 +848,7 @@ def _maybe_fanout_charge_capture_for_other_surgeons(
                 modifiers=mods,
                 cpt_overrides=cpt_overrides,
                 modifier_rules=modifier_rules,
+                cpt_catalog=cpt_catalog,
             )
         except Exception as exc:
             log.warning("fanout build_rows failed scan_id=%s other_id=%s err=%s", scan.id, other_id, str(exc)[:200])
@@ -1146,6 +1157,7 @@ def _reconciliation_line_items(lines: list[dict] | None) -> list[dict]:
                 "line_service_date": str(line.get("line_service_date") or "").strip(),
                 "line_service_datetime_raw": str(line.get("line_service_datetime_raw") or "").strip(),
                 "line_service_time_raw": str(line.get("line_service_time_raw") or "").strip(),
+                "units": int(line.get("units") or line.get("quantity") or 1),
                 "quantity": line.get("quantity"),
                 "raw_row_text": str(line.get("raw_row_text") or "").strip(),
                 "confidence": _line_confidence(line),
@@ -1282,7 +1294,7 @@ def _run_text_capture(
         except Exception:
             pass
     elapsed = (datetime.now(timezone.utc) - t_start).total_seconds()
-    recognized_cpts, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+    recognized_cpts, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
     cap = _filter_capture_to_recognized(cap, recognized_cpts)
     payload = _preview_from_capture(
         cap,
@@ -1292,6 +1304,7 @@ def _run_text_capture(
         cpt_svc.text_model,
         cpt_overrides=cpt_overrides,
         modifier_rules=modifier_rules,
+        cpt_catalog=cpt_catalog,
     )
     return cap, payload, elapsed, cpt_svc.text_model
 
@@ -1338,7 +1351,7 @@ def _run_vision_capture(
         for cpt in (cap.get("cpts") or [])
         if str(cpt or "").strip()
     ]
-    recognized_cpts, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+    recognized_cpts, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
     cap = _filter_capture_to_recognized(cap, recognized_cpts)
     if _ai_second_pass_enabled():
         if event_cb:
@@ -1364,6 +1377,7 @@ def _run_vision_capture(
         cpt_svc.vision_model,
         cpt_overrides=cpt_overrides,
         modifier_rules=modifier_rules,
+        cpt_catalog=cpt_catalog,
     )
     payload["vision_backend"] = vision_backend
     gate_reason = _capture_gate_review_reason(cap, payload)
@@ -1435,6 +1449,7 @@ class LookupBody(BaseModel):
     facility: bool = False
     cf: float = APP_CF_DEFAULT
     modifiers: dict[str, str] = Field(default_factory=dict)
+    lines: list[dict[str, object]] = Field(default_factory=list)
 
 
 class VisionConfigPatch(BaseModel):
@@ -1488,18 +1503,32 @@ def preview_lookup(
     _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     """Recalculate wRVU / payment from CPT list without persisting."""
-    clean = payment_svc.clean_cpt_codes(body.cpts)
+    request_lines = [line for line in body.lines if isinstance(line, dict)]
+    clean = payment_svc.clean_cpt_codes(body.cpts or [str(line.get("cpt") or "") for line in request_lines])
     if not clean:
         return {"cpts": [], "rows": [], "total_payment": 0.0}
-    _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
-    rows, total = payment_svc.build_rows(
-        clean,
-        body.locality,
-        body.facility,
-        body.cf,
-        modifiers=body.modifiers or None,
-        cpt_overrides=cpt_overrides,
-        modifier_rules=modifier_rules,
+    _, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
+    rows, total = (
+        payment_svc.build_rows_from_lines(
+            request_lines,
+            body.locality,
+            body.facility,
+            body.cf,
+            cpt_overrides=cpt_overrides,
+            modifier_rules=modifier_rules,
+            cpt_catalog=cpt_catalog,
+        )
+        if request_lines
+        else payment_svc.build_rows(
+            clean,
+            body.locality,
+            body.facility,
+            body.cf,
+            modifiers=body.modifiers or None,
+            cpt_overrides=cpt_overrides,
+            modifier_rules=modifier_rules,
+            cpt_catalog=cpt_catalog,
+        )
     )
     return {"cpts": clean, "rows": rows, "total_payment": round(total, 2)}
 
@@ -1514,7 +1543,7 @@ def direct_lookup(
     clean = payment_svc.clean_cpt_codes(body.cpts)
     if not clean:
         return {"cpts": [], "rows": [], "total_payment": 0.0}
-    _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+    _, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
     rows, total = payment_svc.build_rows(
         clean,
         body.locality,
@@ -1522,6 +1551,7 @@ def direct_lookup(
         body.cf,
         cpt_overrides=cpt_overrides,
         modifier_rules=modifier_rules,
+        cpt_catalog=cpt_catalog,
     )
     loc_name = payment_svc.locality_name(body.locality)
     enriched = payment_svc.enrich_line_items(rows, None)
@@ -1552,6 +1582,7 @@ class LineItemIn(BaseModel):
     modifier: str = ""
     is_assist: bool = False
     line_service_date: str = ""
+    units: int = 1
 
 
 class CommitBody(BaseModel):
@@ -1596,7 +1627,7 @@ async def commit_scan(
     line_dicts = json.loads(lines)
     if isinstance(line_dicts, list):
         line_dicts = _canonicalize_provider_lines(db, line_dicts, anchor=surgeon)
-    _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+    _, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
     rows, total = (
         payment_svc.build_rows_from_lines(
             line_dicts,
@@ -1605,6 +1636,7 @@ async def commit_scan(
             cf,
             cpt_overrides=cpt_overrides,
             modifier_rules=modifier_rules,
+            cpt_catalog=cpt_catalog,
         )
         if line_dicts
         else payment_svc.build_rows(
@@ -1615,6 +1647,7 @@ async def commit_scan(
             modifiers=None,
             cpt_overrides=cpt_overrides,
             modifier_rules=modifier_rules,
+            cpt_catalog=cpt_catalog,
         )
     )
     loc_name = payment_svc.locality_name(locality)
@@ -1908,7 +1941,7 @@ async def vision_scan(
             err_txt[:200],
         )
         log.warning("vision_scan vision failed persisted_stub surgeon=%s err=%s", surgeon.id, err_txt[:200])
-        recognized_cpts, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+        recognized_cpts, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
         empty_cap: dict = _apply_clinician_capture_fields(
             {
                 "cpts": [],
@@ -1930,6 +1963,7 @@ async def vision_scan(
             cpt_svc.vision_model,
             cpt_overrides=cpt_overrides,
             modifier_rules=modifier_rules,
+            cpt_catalog=cpt_catalog,
         )
         fb_payload["vision_error"] = err_txt
         rr = f"Vision failed; enter CPTs manually. Image was not stored. ({err_txt[:140]})"
@@ -3225,7 +3259,7 @@ def patch_scan(
     locality = body.locality if body.locality is not None else (scan.locality_num or "00")
     fac = body.facility if body.facility is not None else bool(scan.facility)
     cf_val = body.cf if body.cf is not None else (scan.cf or APP_CF_DEFAULT)
-    _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+    _, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
     existing_lines = _parse_line_items(scan.line_items)
     request_lines = [line.model_dump() for line in body.lines] if body.lines is not None else None
     if request_lines is not None:
@@ -3242,6 +3276,7 @@ def patch_scan(
                 cf_val,
                 cpt_overrides=cpt_overrides,
                 modifier_rules=modifier_rules,
+                cpt_catalog=cpt_catalog,
             )
             if line_source
             else payment_svc.build_rows(
@@ -3252,6 +3287,7 @@ def patch_scan(
                 modifiers=body.modifiers,
                 cpt_overrides=cpt_overrides,
                 modifier_rules=modifier_rules,
+                cpt_catalog=cpt_catalog,
             )
         )
         enriched = payment_svc.enrich_line_items(rows, line_source)
@@ -3588,6 +3624,7 @@ class PortalCptRulePatch(BaseModel):
     pe_nonfac_rvu: float | None = None
     pe_fac_rvu: float | None = None
     mp_rvu: float | None = None
+    clear_builtin_override: bool | None = None
 
 
 class PortalModifierRulePatch(BaseModel):
@@ -3601,8 +3638,10 @@ def portal_list_cpt_rules(
     db: Session = Depends(get_db),
     _admin=Depends(get_current_admin_api),
     search: str = "",
+    overrides_only: bool = False,
+    used_only: bool = False,
 ):
-    return {"cpts": list_cpt_catalog(db, search)}
+    return {"cpts": list_cpt_catalog(db, search, overrides_only=overrides_only, used_only=used_only)}
 
 
 @portal_router.patch("/cpt-rules/{cpt}")
@@ -3610,10 +3649,11 @@ def portal_patch_cpt_rule(
     cpt: str,
     body: PortalCptRulePatch,
     db: Session = Depends(get_db),
-    _admin=Depends(get_current_admin_api),
+    admin=Depends(get_current_admin_api),
 ):
+    admin_name = str(getattr(admin, "username", "") or getattr(admin, "email", "")).strip() or "portal"
     try:
-        return patch_cpt_rule(
+        return save_cpt_rule(
             db,
             cpt,
             recognized=body.recognized,
@@ -3622,7 +3662,23 @@ def portal_patch_cpt_rule(
             pe_nonfac_rvu=body.pe_nonfac_rvu,
             pe_fac_rvu=body.pe_fac_rvu,
             mp_rvu=body.mp_rvu,
+            clear_builtin_override=body.clear_builtin_override,
+            added_by_admin_id=getattr(admin, "id", None),
+            added_by_admin_name=admin_name,
+            updated_at=datetime.now(timezone.utc).isoformat(),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@portal_router.delete("/cpt-rules/{cpt}")
+def portal_delete_cpt_rule(
+    cpt: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(get_current_admin_api),
+):
+    try:
+        return delete_cpt_rule(db, cpt)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -4175,7 +4231,7 @@ def portal_patch_scan(
 
         clean = current_cpts or []
         if clean:
-            _, cpt_overrides, modifier_rules = _effective_rule_inputs(db)
+            _, cpt_overrides, modifier_rules, cpt_catalog = _effective_rule_inputs(db)
             modifiers = (
                 body.modifiers
                 if body.modifiers is not None
@@ -4190,6 +4246,7 @@ def portal_patch_scan(
                     scan.cf or APP_CF_DEFAULT,
                     cpt_overrides=cpt_overrides,
                     modifier_rules=modifier_rules,
+                    cpt_catalog=cpt_catalog,
                 )
                 if merged_lines
                 else payment_svc.build_rows(
@@ -4200,6 +4257,7 @@ def portal_patch_scan(
                     modifiers=modifiers,
                     cpt_overrides=cpt_overrides,
                     modifier_rules=modifier_rules,
+                    cpt_catalog=cpt_catalog,
                 )
             )
             scan.total_rvu = round(sum(r.get("total_rvu", 0) for r in rows), 2)

@@ -146,6 +146,26 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  portalCptRules: (search = "", options?: { overridesOnly?: boolean; usedOnly?: boolean }) => {
+    const params = new URLSearchParams();
+    if (search.trim()) params.set("search", search.trim());
+    if (options?.overridesOnly) params.set("overrides_only", "true");
+    if (options?.usedOnly) params.set("used_only", "true");
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return json<{ cpts: CptRule[] }>(`/api/v1/portal/rvu/cpt-rules${query}`);
+  },
+  patchPortalCptRule: (
+    cpt: string,
+    body: { recognized?: boolean; desc?: string; work_rvu?: number; pe_nonfac_rvu?: number; pe_fac_rvu?: number; mp_rvu?: number; clear_builtin_override?: boolean },
+  ) =>
+    json<CptRule>(`/api/v1/portal/rvu/cpt-rules/${encodeURIComponent(cpt)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deletePortalCptRule: async (cpt: string) =>
+    json<CptRule>(`/api/v1/portal/rvu/cpt-rules/${encodeURIComponent(cpt)}`, {
+      method: "DELETE",
+    }),
   deletePortalOpNote: async (id: number) => {
     const r = await fetch(`/api/v1/portal/rvu/op-notes/${id}`, {
       method: "DELETE",
@@ -295,6 +315,33 @@ export type ModifierRule = {
   added_by_staff_id?: number;
   added_by_staff_name?: string;
   added_at?: string;
+};
+
+export type CptRule = {
+  cpt: string;
+  deleted?: boolean;
+  recognized: boolean;
+  desc: string;
+  work_rvu: number;
+  pe_nonfac_rvu: number;
+  pe_fac_rvu: number;
+  mp_rvu: number;
+  is_custom: boolean;
+  has_override: boolean;
+  status: string;
+  override_source?: string | null;
+  cms_desc?: string | null;
+  cms_work_rvu?: number | null;
+  cms_pe_nonfac_rvu?: number | null;
+  cms_pe_fac_rvu?: number | null;
+  cms_mp_rvu?: number | null;
+  cms_present?: boolean;
+  clear_builtin_override?: boolean;
+  added_by_admin_id?: number | null;
+  added_by_admin_name?: string | null;
+  updated_at?: string | null;
+  used_by_practice?: boolean;
+  practice_use_count?: number;
 };
 
 export type PortalUserRecord = {

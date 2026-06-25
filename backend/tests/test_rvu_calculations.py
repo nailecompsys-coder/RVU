@@ -107,6 +107,42 @@ class RvuCalculationTests(unittest.TestCase):
         self.assertTrue(enriched[0]["is_assist"])
         self.assertEqual(enriched[0]["payment"], 114.39)
 
+    def test_service_rows_apply_units_multiplier(self):
+        svc = RvuPaymentService()
+
+        rows, total = svc.build_rows_from_lines(
+            [{"cpt": "19301", "modifier": "50", "units": 3}],
+            "99",
+            False,
+            41.0,
+        )
+
+        self.assertEqual(rows[0]["units"], 3)
+        self.assertEqual(rows[0]["quantity"], 3)
+        self.assertEqual(rows[0]["work_rvu"], 44.46)
+        self.assertEqual(rows[0]["payment"], 1822.86)
+        self.assertEqual(total, 1822.86)
+
+    def test_enriched_line_items_keep_units(self):
+        svc = RvuPaymentService()
+        lines = [
+            {
+                "cpt": "19301",
+                "modifier": "50",
+                "provider_role": "surgeon",
+                "provider_name": "Alex Schroeder",
+                "line_service_date": "2026-06-23",
+                "units": 2,
+            }
+        ]
+
+        rows, _ = svc.build_rows_from_lines(lines, "99", False, 41.0)
+        enriched = svc.enrich_line_items(rows, lines)
+
+        self.assertEqual(enriched[0]["units"], 2)
+        self.assertEqual(enriched[0]["quantity"], 2)
+        self.assertEqual(enriched[0]["payment"], 1215.24)
+
     def test_alphanumeric_modifier_rule_is_supported(self):
         row = calc_payment(
             "27871",

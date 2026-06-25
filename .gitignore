@@ -6,6 +6,7 @@ AuthKey_*.p8
 
 # Python cache and virtualenvs
 .venv/
+.venv*/
 venv/
 __pycache__/
 **/__pycache__/

@@ -26,6 +26,34 @@ def _normalize_modifier_text(value: str) -> str:
     return ",".join(dict.fromkeys(p for p in parts if p))
 
 
+def _normalize_units(value: Any) -> int:
+    try:
+        units = int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return 1
+    return units if units > 0 else 1
+
+
+def _apply_units_multiplier(row: dict[str, Any], units: int) -> dict[str, Any]:
+    if units <= 1:
+        return row
+    scaled = dict(row)
+    scaled["units"] = units
+    scaled["quantity"] = units
+    for key in (
+        "work_rvu",
+        "pe_rvu",
+        "mp_rvu",
+        "total_rvu",
+        "work_payment",
+        "pe_payment",
+        "mp_payment",
+        "payment",
+    ):
+        scaled[key] = round(float(scaled.get(key) or 0) * units, 2)
+    return scaled
+
+
 class RvuPaymentService:
     """Build CPT payment rows and persist scan history."""
 
@@ -40,8 +68,10 @@ class RvuPaymentService:
         facility: bool,
         cf: float,
         modifiers: dict[str, str] | None = None,
+        quantities: dict[str, int] | None = None,
         cpt_overrides: dict[str, RvuRow] | None = None,
         modifier_rules: dict[str, dict[str, object]] | None = None,
+        cpt_catalog: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], float]:
         rows: list[dict[str, Any]] = []
         for cpt in cpts:
@@ -56,6 +86,10 @@ class RvuPaymentService:
                 modifier_rules=modifier_rules,
             )
             row = r.to_dict()
+            rule_entry = (cpt_catalog or {}).get(cpt, {})
+            row["has_override"] = bool(rule_entry.get("has_override"))
+            row["override_source"] = rule_entry.get("override_source")
+            row["cpt_status"] = rule_entry.get("status")
             row["multiple_procedure_factor"] = 1.0
             rows.append(row)
         ranked_indexes = [
@@ -76,6 +110,9 @@ class RvuPaymentService:
                 row["pe_payment"] = round(float(row.get("pe_payment") or 0) * factor, 2)
                 row["mp_payment"] = round(float(row.get("mp_payment") or 0) * factor, 2)
                 row["payment"] = round(float(row.get("payment") or 0) * factor, 2)
+        if quantities:
+            for idx, cpt in enumerate(cpts):
+                rows[idx] = _apply_units_multiplier(rows[idx], _normalize_units(quantities.get(cpt)))
         total = round(sum(float(row.get("payment") or 0) for row in rows), 2)
         return rows, total
 
@@ -88,14 +125,17 @@ class RvuPaymentService:
         *,
         cpt_overrides: dict[str, RvuRow] | None = None,
         modifier_rules: dict[str, dict[str, object]] | None = None,
+        cpt_catalog: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], float]:
         rows: list[dict[str, Any]] = []
+        row_units: list[int] = []
         for line in lines:
             if not isinstance(line, dict):
                 continue
             cpt = str(line.get("cpt") or "").strip()
             if not re.fullmatch(r"\d{5}", cpt):
                 continue
+            units = _normalize_units(line.get("units", line.get("quantity")))
             modifier = _normalize_modifier_text(str(line.get("modifier") or ""))
             role = str(line.get("provider_role") or "").strip().lower()
             is_assist = bool(line.get("is_assist")) or role in ("pa", "assistant") or "AS" in modifier
@@ -111,8 +151,13 @@ class RvuPaymentService:
                 modifier_rules=modifier_rules,
             )
             row = r.to_dict()
+            rule_entry = (cpt_catalog or {}).get(cpt, {})
+            row["has_override"] = bool(rule_entry.get("has_override"))
+            row["override_source"] = rule_entry.get("override_source")
+            row["cpt_status"] = rule_entry.get("status")
             row["multiple_procedure_factor"] = 1.0
             rows.append(row)
+            row_units.append(units)
         ranked_indexes = [
             idx for idx, row in enumerate(rows)
             if "AS" not in str(row.get("modifier") or "").upper()
@@ -131,6 +176,8 @@ class RvuPaymentService:
                 row["pe_payment"] = round(float(row.get("pe_payment") or 0) * factor, 2)
                 row["mp_payment"] = round(float(row.get("mp_payment") or 0) * factor, 2)
                 row["payment"] = round(float(row.get("payment") or 0) * factor, 2)
+        for idx, units in enumerate(row_units):
+            rows[idx] = _apply_units_multiplier(rows[idx], units)
         total = round(sum(float(row.get("payment") or 0) for row in rows), 2)
         return rows, total
 
@@ -195,7 +242,7 @@ class RvuPaymentService:
                             "line_service_date": line_sd,
                             "line_service_datetime_raw": str(L.get("line_service_datetime_raw") or "").strip(),
                             "line_service_time_raw": str(L.get("line_service_time_raw") or "").strip(),
-                            "quantity": L.get("quantity"),
+                            "quantity": L.get("units", L.get("quantity")),
                             "raw_row_text": str(L.get("raw_row_text") or "").strip(),
                         }
                     )
@@ -220,7 +267,7 @@ class RvuPaymentService:
                                 "line_service_date": line_sd,
                                 "line_service_datetime_raw": str(L.get("line_service_datetime_raw") or "").strip(),
                                 "line_service_time_raw": str(L.get("line_service_time_raw") or "").strip(),
-                                "quantity": L.get("quantity"),
+                                "quantity": L.get("units", L.get("quantity")),
                                 "raw_row_text": str(L.get("raw_row_text") or "").strip(),
                             }
                         )
@@ -305,6 +352,7 @@ class RvuPaymentService:
                 out_line["line_service_time_raw"] = line_time_raw
             if quantity not in (None, ""):
                 out_line["quantity"] = quantity
+                out_line["units"] = _normalize_units(quantity)
             if raw_row_text:
                 out_line["raw_row_text"] = raw_row_text
             out.append(out_line)
@@ -353,6 +401,7 @@ class RvuPaymentService:
                     assist_row["raw_row_text"] = str(L.get("raw_row_text") or "").strip()
                 if L.get("quantity") not in (None, ""):
                     assist_row["quantity"] = L.get("quantity")
+                    assist_row["units"] = _normalize_units(L.get("quantity"))
                 out.append(assist_row)
         # If OCR missed explicit AS but PA is present in row text, synthesize an audit assist row.
         if lines:

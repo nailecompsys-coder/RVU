@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   api,
   type DeviceRecord,
+  type CptRule,
   type PortalMe,
   type PortalDashboardDrilldownResponse,
   type PortalDashboardResponse,
@@ -20,7 +21,7 @@ import PortalOpNotesPanel from "../components/PortalOpNotesPanel";
 import PortalUsersPanel from "../components/PortalUsersPanel";
 import { fmtCalendarDateMdY, fmtDateTimeEt } from "../dates";
 
-type Tab = "scans" | "staff" | "devices" | "opnotes" | "settings";
+type Tab = "scans" | "staff" | "devices" | "opnotes" | "rules" | "settings";
 const SCAN_PAGE_SIZE = 100;
 
 const fmt$ = (n: number) =>
@@ -86,6 +87,14 @@ function trendLabel(value: number): string {
   return "Flat vs prior";
 }
 
+function cptOverrideSourceLabel(source: string | null | undefined): string {
+  const value = source?.trim().toLowerCase();
+  if (value === "practice") return "Practice override";
+  if (value === "portal") return "Portal override";
+  if (value === "commercial") return "Commercial override";
+  return "Override";
+}
+
 // ── Table shared styles ────────────────────────────────────────────────────────
 const TH = "px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-ink-secondary whitespace-nowrap border-b-2 border-brand-border bg-surface-soft text-left";
 const TD = "px-3 py-2.5 text-sm border-b border-brand-border/60 align-top";
@@ -109,7 +118,34 @@ type LineItem = {
   pe_payment?: number;
   mp_payment?: number;
   payment?: number;
+  has_override?: boolean;
+  override_source?: string | null;
+  cpt_status?: string | null;
 };
+
+type CptEditorDraft = {
+  cpt: string;
+  recognized: boolean;
+  desc: string;
+  work_rvu: string;
+  pe_nonfac_rvu: string;
+  pe_fac_rvu: string;
+  mp_rvu: string;
+  clear_builtin_override: boolean;
+};
+
+function newCptEditorDraft(rule?: CptRule | null): CptEditorDraft {
+  return {
+    cpt: rule?.cpt ?? "",
+    recognized: rule?.recognized ?? true,
+    desc: rule?.desc ?? rule?.cms_desc ?? "",
+    work_rvu: rule?.work_rvu != null ? String(rule.work_rvu) : String(rule?.cms_work_rvu ?? ""),
+    pe_nonfac_rvu: rule?.pe_nonfac_rvu != null ? String(rule.pe_nonfac_rvu) : String(rule?.cms_pe_nonfac_rvu ?? ""),
+    pe_fac_rvu: rule?.pe_fac_rvu != null ? String(rule.pe_fac_rvu) : String(rule?.cms_pe_fac_rvu ?? ""),
+    mp_rvu: rule?.mp_rvu != null ? String(rule.mp_rvu) : String(rule?.cms_mp_rvu ?? ""),
+    clear_builtin_override: Boolean(rule?.clear_builtin_override),
+  };
+}
 
 function parseLineItems(scan: PortalScanRow): LineItem[] {
   const raw = (scan.line_items as unknown) ?? scan.cpts ?? [];
@@ -366,6 +402,17 @@ export default function PortalDashboardPage() {
   const [modifiers, setModifiers] = useState<ModifierRule[]>([]);
   const [modifiersLoaded, setModifiersLoaded] = useState(false);
   const [modifierSavingCode, setModifierSavingCode] = useState<string | null>(null);
+  const [cptRules, setCptRules] = useState<CptRule[]>([]);
+  const [cptRulesLoaded, setCptRulesLoaded] = useState(false);
+  const [cptSearch, setCptSearch] = useState("");
+  const [cptOverridesOnly, setCptOverridesOnly] = useState(false);
+  const [cptUsedOnly, setCptUsedOnly] = useState(false);
+  const [cptLoading, setCptLoading] = useState(false);
+  const [cptSavingCode, setCptSavingCode] = useState<string | null>(null);
+  const [cptDeletingCode, setCptDeletingCode] = useState<string | null>(null);
+  const [cptEditorCode, setCptEditorCode] = useState<string | null>(null);
+  const [cptEditorDraft, setCptEditorDraft] = useState<CptEditorDraft>(newCptEditorDraft());
+  const [cptErr, setCptErr] = useState<string | null>(null);
   const defaultModelForProvider = (p: string) =>
     p === "openai" ? "gpt-4o-mini" : p === "anthropic" ? "claude-3-5-sonnet-latest" : p === "paddle" ? "paddleocr" : "qwen2.5vl:7b";
   const todayKey = useMemo(() => etDateKey(new Date().toISOString()), []);
@@ -373,6 +420,54 @@ export default function PortalDashboardPage() {
     () => modifiers.filter((rule) => rule.needs_review || rule.source === "mobile"),
     [modifiers],
   );
+  const overriddenCptRules = useMemo(
+    () => cptRules.filter((rule) => rule.has_override),
+    [cptRules],
+  );
+  const cptRuleMatches = cptRules;
+
+  const loadCptRules = async (
+    search = cptSearch,
+    options: { overridesOnly?: boolean; usedOnly?: boolean } = {},
+  ) => {
+    setCptLoading(true);
+    setCptErr(null);
+    try {
+      const res = await api.portalCptRules(search, {
+        overridesOnly: options.overridesOnly ?? cptOverridesOnly,
+        usedOnly: options.usedOnly ?? cptUsedOnly,
+      });
+      setCptRules(res.cpts);
+      setCptRulesLoaded(true);
+    } catch (e: unknown) {
+      setCptErr(e instanceof Error ? e.message : "Could not load CPT rules.");
+    } finally {
+      setCptLoading(false);
+    }
+  };
+
+  const openCptEditor = (rule?: CptRule | null) => {
+    setCptEditorCode(rule?.cpt ?? "__new__");
+    setCptEditorDraft(newCptEditorDraft(rule));
+    setCptErr(null);
+  };
+
+  const closeCptEditor = () => {
+    setCptEditorCode(null);
+    setCptEditorDraft(newCptEditorDraft());
+    setCptErr(null);
+  };
+
+  const upsertCptRule = (updated: CptRule) => {
+    setCptRules((prev) => {
+      if (updated.deleted) return prev.filter((rule) => rule.cpt !== updated.cpt);
+      const existing = prev.findIndex((rule) => rule.cpt === updated.cpt);
+      if (existing === -1) return [updated, ...prev].sort((a, b) => a.cpt.localeCompare(b.cpt));
+      const next = prev.slice();
+      next[existing] = updated;
+      return next.sort((a, b) => a.cpt.localeCompare(b.cpt));
+    });
+  };
 
   const clearModifierReview = async (rule: ModifierRule) => {
     setModifierSavingCode(rule.code);
@@ -385,6 +480,47 @@ export default function PortalDashboardPage() {
       setModifiers((prev) => prev.map((item) => (item.code === updated.code ? updated : item)));
     } finally {
       setModifierSavingCode(null);
+    }
+  };
+
+  const saveCptRule = async () => {
+    const cleanCpt = cptEditorDraft.cpt.replace(/\D/g, "").slice(0, 5);
+    if (cleanCpt.length !== 5) {
+      setCptErr("CPT must be a 5-digit code.");
+      return;
+    }
+    setCptSavingCode(cleanCpt);
+    setCptErr(null);
+    try {
+      const updated = await api.patchPortalCptRule(cleanCpt, {
+        recognized: cptEditorDraft.recognized,
+        desc: cptEditorDraft.desc.trim(),
+        work_rvu: Number(cptEditorDraft.work_rvu || 0),
+        pe_nonfac_rvu: Number(cptEditorDraft.pe_nonfac_rvu || 0),
+        pe_fac_rvu: Number(cptEditorDraft.pe_fac_rvu || 0),
+        mp_rvu: Number(cptEditorDraft.mp_rvu || 0),
+        clear_builtin_override: cptEditorDraft.clear_builtin_override,
+      });
+      upsertCptRule(updated);
+      closeCptEditor();
+    } catch (e: unknown) {
+      setCptErr(e instanceof Error ? e.message : "Could not save CPT rule.");
+    } finally {
+      setCptSavingCode(null);
+    }
+  };
+
+  const removeCptRule = async (rule: CptRule) => {
+    setCptDeletingCode(rule.cpt);
+    setCptErr(null);
+    try {
+      const updated = await api.deletePortalCptRule(rule.cpt);
+      upsertCptRule(updated);
+      if (cptEditorCode === rule.cpt) closeCptEditor();
+    } catch (e: unknown) {
+      setCptErr(e instanceof Error ? e.message : "Could not reset CPT rule.");
+    } finally {
+      setCptDeletingCode(null);
     }
   };
 
@@ -445,7 +581,7 @@ export default function PortalDashboardPage() {
         })
         .catch(() => {});
     }
-    if (tab === "settings" && !modifiersLoaded) {
+    if (tab === "rules" && !modifiersLoaded) {
       void api.portalModifierRules()
         .then((res) => {
           setModifiers(res.modifiers);
@@ -453,7 +589,10 @@ export default function PortalDashboardPage() {
         })
         .catch(() => {});
     }
-  }, [admin, tab, staffLoaded, devicesLoaded, modifiersLoaded]);
+    if (tab === "rules" && !cptRulesLoaded) {
+      void loadCptRules("", { overridesOnly: cptOverridesOnly, usedOnly: cptUsedOnly });
+    }
+  }, [admin, tab, staffLoaded, devicesLoaded, modifiersLoaded, cptRulesLoaded, cptOverridesOnly, cptUsedOnly]);
 
   useEffect(() => {
     if (!admin || admin.role !== "superadmin") return;
@@ -764,6 +903,7 @@ export default function PortalDashboardPage() {
     { id: "scans", label: "Scans" },
     { id: "staff", label: "Staff" },
     { id: "devices", label: "Devices" },
+    { id: "rules", label: "CPT / Modifier" },
     { id: "opnotes", label: "OP notes" },
     { id: "settings", label: "Settings" },
   ];
@@ -1356,11 +1496,285 @@ export default function PortalDashboardPage() {
         {/* ══════════════ DEVICES TAB ══════════════ */}
         {tab === "opnotes" && <PortalOpNotesPanel />}
 
-        {tab === "settings" && (
+        {tab === "rules" && (
           <div>
-            <h2 className="text-lg font-bold text-ink mb-1">Settings</h2>
-            <p className="text-sm text-ink-secondary mb-6">Portal accounts for office staff (username and password).</p>
-            <PortalUsersPanel admin={admin} />
+            <h2 className="text-lg font-bold text-ink mb-1">CPT / Modifier</h2>
+            <p className="text-sm text-ink-secondary mb-6">Manage CPT recognition, RVU overrides, and modifier review.</p>
+            <div className="card mt-6 p-5">
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <h3 className="text-sm font-black text-ink uppercase tracking-wide">CPT library</h3>
+                  <p className="text-xs text-ink-secondary mt-1">
+                    Full CMS-backed CPT list for RVU. Search, override, add custom codes, or reset a code back to CMS. Any override used in a capture will carry its source through the app.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button className="btn-secondary text-xs px-3 py-2" onClick={() => void loadCptRules("")}>
+                    Refresh
+                  </button>
+                  <button className="btn-primary text-xs px-3 py-2" onClick={() => openCptEditor(null)}>
+                    Add CPT
+                  </button>
+                </div>
+              </div>
+              <div className={cptEditorCode ? "grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]" : "grid gap-4"}>
+                <div className="space-y-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <input
+                      className="input flex-1"
+                      placeholder="Search CPT or description"
+                      value={cptSearch}
+                      onChange={(e) => setCptSearch(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void loadCptRules();
+                      }}
+                    />
+                    <div className="flex items-center gap-2">
+                      <button className="btn-secondary text-xs px-3 py-2" onClick={() => void loadCptRules()}>
+                        Search
+                      </button>
+                      <button
+                        className="btn-secondary text-xs px-3 py-2"
+                        onClick={() => {
+                          setCptSearch("");
+                          void loadCptRules("");
+                        }}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      className={cptOverridesOnly ? "btn-primary text-xs px-3 py-2" : "btn-secondary text-xs px-3 py-2"}
+                      onClick={() => {
+                        const next = !cptOverridesOnly;
+                        setCptOverridesOnly(next);
+                        void loadCptRules(cptSearch, { overridesOnly: next, usedOnly: cptUsedOnly });
+                      }}
+                    >
+                      Overrides only
+                    </button>
+                    <button
+                      className={cptUsedOnly ? "btn-primary text-xs px-3 py-2" : "btn-secondary text-xs px-3 py-2"}
+                      onClick={() => {
+                        const next = !cptUsedOnly;
+                        setCptUsedOnly(next);
+                        void loadCptRules(cptSearch, { overridesOnly: cptOverridesOnly, usedOnly: next });
+                      }}
+                    >
+                      Used by practice
+                    </button>
+                    {(cptOverridesOnly || cptUsedOnly) && (
+                      <button
+                        className="btn-secondary text-xs px-3 py-2"
+                        onClick={() => {
+                          setCptOverridesOnly(false);
+                          setCptUsedOnly(false);
+                          void loadCptRules(cptSearch, { overridesOnly: false, usedOnly: false });
+                        }}
+                      >
+                        Clear filters
+                      </button>
+                    )}
+                  </div>
+                  {cptErr && <p className="text-sm text-red-600">{cptErr}</p>}
+                  {!cptRulesLoaded || cptLoading ? (
+                    <p className="text-sm text-ink-secondary">Loading CPT library...</p>
+                  ) : cptRuleMatches.length === 0 ? (
+                    <p className="text-sm text-ink-secondary">No CPT rules matched that search.</p>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-ink-secondary">
+                        <span>{cptRuleMatches.length.toLocaleString()} codes loaded</span>
+                        <span>·</span>
+                        <span>{overriddenCptRules.length.toLocaleString()} currently overridden</span>
+                        {cptUsedOnly && (
+                          <>
+                            <span>·</span>
+                            <span>practice usage only</span>
+                          </>
+                        )}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full border-collapse">
+                          <thead>
+                            <tr className="bg-surface-soft text-left">
+                              <th className="w-[88px] px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary">CPT</th>
+                              <th className="min-w-[260px] px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary">Description</th>
+                              <th className="w-[150px] px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary">Current wRVU</th>
+                              <th className="w-[150px] px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary">CMS wRVU</th>
+                              <th className="w-[152px] px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary">Source</th>
+                              <th className="w-[152px] px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary">Status</th>
+                              <th className="w-[180px] px-3 py-2 text-[11px] uppercase tracking-wide text-ink-secondary text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {cptRuleMatches.map((rule) => (
+                              <tr key={rule.cpt} className="border-t border-border">
+                                <td className="px-3 py-3 font-mono font-black text-ink">{rule.cpt}</td>
+                                <td className="px-3 py-3 text-sm text-ink">
+                                  <div className="font-semibold">{rule.desc || "No description"}</div>
+                                  {rule.cms_desc && rule.cms_desc !== rule.desc && (
+                                    <div className="text-[11px] text-ink-secondary">CMS: {rule.cms_desc}</div>
+                                  )}
+                                  {rule.used_by_practice && (
+                                    <div className="text-[11px] text-ink-secondary">
+                                      Used in {Number(rule.practice_use_count ?? 0).toLocaleString()} capture{Number(rule.practice_use_count ?? 0) === 1 ? "" : "s"}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="px-3 py-3 text-sm font-mono tabular-nums">
+                                  <div className="font-semibold">{Number(rule.work_rvu ?? 0).toFixed(2)}</div>
+                                  <div className="text-[10px] leading-tight text-ink-secondary">
+                                    NF {Number(rule.pe_nonfac_rvu ?? 0).toFixed(2)} · F {Number(rule.pe_fac_rvu ?? 0).toFixed(2)} · MP {Number(rule.mp_rvu ?? 0).toFixed(2)}
+                                  </div>
+                                </td>
+                                <td className="px-3 py-3 text-sm font-mono tabular-nums">
+                                  {rule.cms_present ? (
+                                    <>
+                                      <div className="font-semibold">{Number(rule.cms_work_rvu ?? 0).toFixed(2)}</div>
+                                      <div className="text-[10px] leading-tight text-ink-secondary">
+                                        NF {Number(rule.cms_pe_nonfac_rvu ?? 0).toFixed(2)} · F {Number(rule.cms_pe_fac_rvu ?? 0).toFixed(2)} · MP {Number(rule.cms_mp_rvu ?? 0).toFixed(2)}
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <span className="text-ink-secondary">Custom only</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-3 align-top">
+                                  <div className="flex min-h-[54px] items-start">
+                                    {rule.has_override ? (
+                                      <span className="inline-flex max-w-full whitespace-normal rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-800">
+                                        {cptOverrideSourceLabel(rule.override_source)}
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex max-w-full whitespace-normal rounded-full bg-brand-muted px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-brand-blue">
+                                        CMS
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="px-3 py-3 align-top">
+                                  <div className="flex min-h-[54px] flex-wrap items-start gap-1.5">
+                                    <span className={rule.recognized ? "badge-green" : "badge-yellow"}>
+                                      {rule.recognized ? "Recognized" : "Hidden"}
+                                    </span>
+                                    {rule.is_custom && <span className="badge bg-sky-50 text-sky-700 border border-sky-200">Custom</span>}
+                                    {rule.clear_builtin_override && <span className="badge bg-emerald-50 text-emerald-700 border border-emerald-200">Using CMS</span>}
+                                  </div>
+                                </td>
+                                <td className="px-3 py-3 text-right align-top">
+                                  <div className="flex flex-col items-end gap-2">
+                                    <button className="btn-secondary min-w-[108px] whitespace-nowrap text-xs px-3 py-1.5" onClick={() => openCptEditor(rule)}>
+                                      Edit
+                                    </button>
+                                    <button
+                                      className="btn-secondary min-w-[108px] whitespace-nowrap text-xs px-3 py-1.5"
+                                      disabled={cptDeletingCode === rule.cpt}
+                                      onClick={() => void removeCptRule(rule)}
+                                    >
+                                      {cptDeletingCode === rule.cpt
+                                        ? "Saving..."
+                                        : rule.is_custom
+                                          ? "Delete"
+                                          : rule.has_override
+                                            ? "Use CMS"
+                                            : "Reset"}
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                </div>
+                {cptEditorCode ? (
+                  <div className="rounded-2xl border border-brand-border bg-surface-soft p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <h4 className="text-sm font-black text-ink uppercase tracking-wide">
+                          {cptEditorCode === "__new__" ? "Add CPT" : `Edit ${cptEditorDraft.cpt}`}
+                        </h4>
+                      </div>
+                      <button className="btn-secondary text-xs px-3 py-1.5" onClick={closeCptEditor}>
+                        Close
+                      </button>
+                    </div>
+                    <div className="mt-4 space-y-3">
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <label className="label">CPT</label>
+                          <input
+                            className="input font-mono"
+                            value={cptEditorDraft.cpt}
+                            maxLength={5}
+                            onChange={(e) => setCptEditorDraft((draft) => ({ ...draft, cpt: e.target.value.replace(/\D/g, "").slice(0, 5) }))}
+                          />
+                        </div>
+                        <div className="flex items-end">
+                          <label className="inline-flex items-center gap-2 text-sm text-ink">
+                            <input
+                              type="checkbox"
+                              checked={cptEditorDraft.recognized}
+                              onChange={(e) => setCptEditorDraft((draft) => ({ ...draft, recognized: e.target.checked }))}
+                            />
+                            Recognized in capture
+                          </label>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="label">Description</label>
+                        <input
+                          className="input"
+                          value={cptEditorDraft.desc}
+                          onChange={(e) => setCptEditorDraft((draft) => ({ ...draft, desc: e.target.value }))}
+                        />
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                          <label className="label">Work RVU</label>
+                          <input className="input font-mono" value={cptEditorDraft.work_rvu} onChange={(e) => setCptEditorDraft((draft) => ({ ...draft, work_rvu: e.target.value }))} />
+                        </div>
+                        <div>
+                          <label className="label">PE Non-Facility</label>
+                          <input className="input font-mono" value={cptEditorDraft.pe_nonfac_rvu} onChange={(e) => setCptEditorDraft((draft) => ({ ...draft, pe_nonfac_rvu: e.target.value }))} />
+                        </div>
+                        <div>
+                          <label className="label">PE Facility</label>
+                          <input className="input font-mono" value={cptEditorDraft.pe_fac_rvu} onChange={(e) => setCptEditorDraft((draft) => ({ ...draft, pe_fac_rvu: e.target.value }))} />
+                        </div>
+                        <div>
+                          <label className="label">MP RVU</label>
+                          <input className="input font-mono" value={cptEditorDraft.mp_rvu} onChange={(e) => setCptEditorDraft((draft) => ({ ...draft, mp_rvu: e.target.value }))} />
+                        </div>
+                      </div>
+                      <label className="inline-flex items-center gap-2 text-sm text-ink">
+                        <input
+                          type="checkbox"
+                          checked={cptEditorDraft.clear_builtin_override}
+                          onChange={(e) => setCptEditorDraft((draft) => ({ ...draft, clear_builtin_override: e.target.checked }))}
+                        />
+                        Force CMS if this CPT has a hardcoded backend override
+                      </label>
+                      <div className="flex flex-wrap gap-2 pt-2">
+                        <button
+                          className="btn-primary text-xs px-4 py-2"
+                          disabled={cptSavingCode === cptEditorDraft.cpt}
+                          onClick={() => void saveCptRule()}
+                        >
+                          {cptSavingCode === cptEditorDraft.cpt ? "Saving..." : "Save CPT"}
+                        </button>
+                        <button className="btn-secondary text-xs px-4 py-2" onClick={closeCptEditor}>Cancel</button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
             <div className="card mt-6 p-5">
               <div className="flex items-start justify-between gap-4 mb-4">
                 <div>
@@ -1422,6 +1836,14 @@ export default function PortalDashboardPage() {
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {tab === "settings" && (
+          <div>
+            <h2 className="text-lg font-bold text-ink mb-1">Settings</h2>
+            <p className="text-sm text-ink-secondary mb-6">Portal accounts for office staff (username and password).</p>
+            <PortalUsersPanel admin={admin} />
             {admin.role === "superadmin" && (
               <div className="card mt-6 p-5 border-2 border-brand-blue/25">
                 <p className="label text-brand-blue mb-2">Developer AI engine (you only)</p>
@@ -1898,8 +2320,8 @@ export default function PortalDashboardPage() {
                     <table className="w-full border-collapse min-w-[860px]">
                       <thead>
                         <tr>
-                          {["CPT", "Procedure / Provider", "Modifier", "wRVU", "PE RVU", "MP RVU", "Total RVU", "Work $", "PE $", "MP $", "Payment", "AS"].map((h, i) => (
-                            <th key={h} className={`${TH} ${i >= 3 && i <= 10 ? "text-right" : "text-left"}`}>{h}</th>
+                          {["CPT", "Procedure / Provider", "Modifier", "Rule", "wRVU", "PE RVU", "MP RVU", "Total RVU", "Work $", "PE $", "MP $", "Payment", "AS"].map((h, i) => (
+                            <th key={h} className={`${TH} ${i >= 4 && i <= 11 ? "text-right" : "text-left"}`}>{h}</th>
                           ))}
                         </tr>
                       </thead>
@@ -1932,6 +2354,15 @@ export default function PortalDashboardPage() {
                                 ) : li.modifier ? (
                                   <span className="text-[10px] text-ink-secondary">{li.modifier}</span>
                                 ) : "—"}
+                              </td>
+                              <td className={`${TD} text-xs`}>
+                                {li.has_override ? (
+                                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-800">
+                                    {cptOverrideSourceLabel(li.override_source)}
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] text-ink-secondary">CMS</span>
+                                )}
                               </td>
                               <td className={`${TD} text-right font-mono tabular-nums text-xs`}>{Number(li.work_rvu ?? 0).toFixed(2)}</td>
                               <td className={`${TD} text-right font-mono tabular-nums text-xs text-ink-secondary`}>{Number(li.pe_rvu ?? 0).toFixed(2)}</td>
