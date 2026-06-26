@@ -4,6 +4,8 @@ Uses the **same PostgreSQL database** as other practice apps for shared tables: 
 
 **Open this folder for backend, portal, and production deploy work.**
 
+**Agents:** read [`AGENTS.md`](AGENTS.md) first. Full platform map: [`/Users/donnaile/dev/rvu/docs/PLATFORM_MAP.md`](/Users/donnaile/dev/rvu/docs/PLATFORM_MAP.md).
+
 On the dev Mac, the source-of-truth path is:
 
 ```text

@@ -4,6 +4,8 @@ This document exists to prevent split-repo drift.
 
 For the product-wide folder policy, see `docs/PROJECT_STRUCTURE_STANDARD.md`.
 
+Platform map (all repos, servers, AI routing): `/Users/donnaile/dev/rvu/docs/PLATFORM_MAP.md` (also `docs/PLATFORM_MAP.md` stub in this repo).
+
 ## Canonical Paths
 
 | Surface | Local path | Production path | Git |
@@ -16,7 +18,7 @@ For the product-wide folder policy, see `docs/PROJECT_STRUCTURE_STANDARD.md`.
 
 ## Current Native Build Line
 
-Native iOS beta `2.5 (46)` is in:
+Native iOS beta **2.5 (52)** is in:
 
 ```text
 /Users/donnaile/dev/rvu/mobile-swiftui-overhaul/native-ios/project.yml
@@ -26,7 +28,7 @@ The values are:
 
 ```yaml
 MARKETING_VERSION: 2.5
-CURRENT_PROJECT_VERSION: 46
+CURRENT_PROJECT_VERSION: 52
 ```
 
 That worktree tracks `origin/ios-swiftui-overhaul`.
