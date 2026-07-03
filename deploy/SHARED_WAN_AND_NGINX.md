@@ -62,6 +62,31 @@ That file defines **`listen 443 ssl http2 default_server`** for **atlas.midflori
 
    You should see **DNS:rvu.midfloridasurgical.com** in SANs.
 
+   RVU mobile traffic should use the RSA Let’s Encrypt certificate on the edge host for
+   maximum hospital-network compatibility:
+
+   ```bash
+   sudo certbot certonly --webroot -w /var/www/html \
+     -d rvu.midfloridasurgical.com \
+     --key-type rsa \
+     --cert-name rvu.midfloridasurgical.com-rsa
+   ```
+
+   The live nginx RVU vhost should point at:
+
+   ```text
+   /etc/letsencrypt/live/rvu.midfloridasurgical.com-rsa/fullchain.pem
+   /etc/letsencrypt/live/rvu.midfloridasurgical.com-rsa/privkey.pem
+   ```
+
+   Confirm the public cert is RSA:
+
+   ```bash
+   echo | openssl s_client -connect rvu.midfloridasurgical.com:443 -servername rvu.midfloridasurgical.com 2>/dev/null \
+     | openssl x509 -noout -text \
+     | grep -E "Public Key Algorithm|Signature Algorithm"
+   ```
+
 7. **App env** (`.env` for `rvu_api`):
 
    - `BASE_URL=https://rvu.midfloridasurgical.com`
