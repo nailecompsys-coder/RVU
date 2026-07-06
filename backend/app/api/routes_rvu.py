@@ -2770,13 +2770,15 @@ def _period_bounds(range_key: str, today: date) -> tuple[date, date, date, date]
         except ValueError:
             prev_end = date(today.year - 1, today.month + 1, 1) - timedelta(days=1)
         return start, end, prev_start, prev_end
-    # "month" = rolling 30 calendar days (inclusive), same idea as "week"'s rolling 7d.
-    # Calendar month-to-date left early-month stats empty while Week still showed recent cases.
+    # "month" drives the mobile dashboard's "This month" hero card. Keep it
+    # calendar month-to-date so current value, MTD wRVU, and projected month-end
+    # value all describe the same period. Rolling 30-day values are returned in
+    # their own explicit rolling_* fields.
     if range_key == "month":
+        start = date(today.year, today.month, 1)
         end = today
-        start = today - timedelta(days=29)
         prev_end = start - timedelta(days=1)
-        prev_start = prev_end - timedelta(days=29)
+        prev_start = date(prev_end.year, prev_end.month, 1)
         return start, end, prev_start, prev_end
     raise ValueError(f"unsupported stats range: {range_key!r}")
 
@@ -2890,6 +2892,7 @@ def _build_monthly_trend(scans: list[RvuScan], today: date) -> list[dict[str, ob
                 "label": datetime(year, month, 1).strftime("%b"),
                 "cases": len(month_scans),
                 "wrvu": _sum_wrvu(month_scans),
+                "compensation": _sum_surgeon_value(month_scans),
             }
         )
     return trend
@@ -2944,8 +2947,8 @@ def _build_top_cpt_contribution(scans: list[RvuScan], *, total_payment: float | 
 
 def _build_setting_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
     grouped = {
-        "Facility": {"label": "Facility", "count": 0, "wrvu": 0.0},
-        "Non-Facility": {"label": "Non-Facility", "count": 0, "wrvu": 0.0},
+        "Facility": {"label": "Facility", "count": 0, "wrvu": 0.0, "compensation": 0.0},
+        "Non-Facility": {"label": "Non-Facility", "count": 0, "wrvu": 0.0, "compensation": 0.0},
     }
     for scan in scans:
         if not _is_verified_scan(scan):
@@ -2953,6 +2956,7 @@ def _build_setting_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
         key = "Facility" if bool(scan.facility) else "Non-Facility"
         grouped[key]["count"] += 1
         grouped[key]["wrvu"] = round(float(grouped[key]["wrvu"]) + _scan_wrvu(scan), 2)
+        grouped[key]["compensation"] = round(float(grouped[key]["compensation"]) + _scan_work_payment(scan), 2)
     return [grouped["Facility"], grouped["Non-Facility"]]
 
 
