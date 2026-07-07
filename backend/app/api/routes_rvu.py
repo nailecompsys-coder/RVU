@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.models_identity import RvuStaff
 from app.database import get_db
-from app.models_rvu import RvuOpNote, RvuScan, RvuScanAiRun, RvuUserSettings
+from app.models_rvu import RvuClientEvent, RvuOpNote, RvuScan, RvuScanAiRun, RvuUserSettings
 from app.rvu.lookup import CF_2026
 from app.services.rvu_cpt_service import (
     RvuCptExtractionService,
@@ -1464,6 +1464,59 @@ def list_providers(
             for s in providers
         ]
     }
+
+
+class ClientEventBody(BaseModel):
+    platform: str = Field("ios", max_length=32)
+    app_version: str | None = Field(None, max_length=64)
+    event_type: str = Field(..., max_length=64)
+    request_id: str | None = Field(None, max_length=128)
+    scan_id: int | None = None
+    image_kb: int | None = None
+    state: str | None = Field(None, max_length=64)
+    error_kind: str | None = Field(None, max_length=64)
+    error_message: str | None = Field(None, max_length=1000)
+    detail: str | None = Field(None, max_length=2000)
+    network_path: str | None = Field(None, max_length=64)
+    payload: dict[str, object] | None = None
+
+
+@router.post("/client-events")
+def create_client_event(
+    body: ClientEventBody,
+    db: Session = Depends(get_db),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
+):
+    """Store mobile-side capture/network breadcrumbs for support triage."""
+    staff, _device = auth
+    event = RvuClientEvent(
+        staff_id=staff.id,
+        platform=body.platform.strip().lower() or "ios",
+        app_version=(body.app_version or "").strip() or None,
+        event_type=body.event_type.strip()[:64],
+        request_id=_sanitize_client_request_id(body.request_id),
+        scan_id=body.scan_id,
+        image_kb=body.image_kb,
+        state=(body.state or "").strip()[:64] or None,
+        error_kind=(body.error_kind or "").strip()[:64] or None,
+        error_message=(body.error_message or "").strip()[:1000] or None,
+        detail=(body.detail or "").strip()[:2000] or None,
+        network_path=(body.network_path or "").strip()[:64] or None,
+        payload=json.dumps(body.payload or {}, separators=(",", ":"), default=str)[:4000],
+    )
+    db.add(event)
+    db.commit()
+    log.info(
+        "client_event staff_id=%s platform=%s event=%s req_id=%s state=%s err=%s scan_id=%s",
+        staff.id,
+        event.platform,
+        event.event_type,
+        event.request_id or "-",
+        event.state or "-",
+        event.error_kind or "-",
+        event.scan_id or "-",
+    )
+    return {"ok": True, "id": event.id}
 
 
 class LookupBody(BaseModel):

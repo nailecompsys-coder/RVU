@@ -72,6 +72,32 @@ class RvuScanAiRun(Base):
     scan = relationship("RvuScan")
 
 
+class RvuClientEvent(Base):
+    __tablename__ = "rvu_client_events"
+    __table_args__ = (
+        Index("ix_rvu_client_events_staff_created", "staff_id", "created_at"),
+        Index("ix_rvu_client_events_request_id", "request_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    staff_id = Column(Integer, ForeignKey("rvu_staff.id"), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    platform = Column(String(32), nullable=False, default="ios")
+    app_version = Column(String(64), nullable=True)
+    event_type = Column(String(64), nullable=False)
+    request_id = Column(String(128), nullable=True)
+    scan_id = Column(Integer, nullable=True)
+    image_kb = Column(Integer, nullable=True)
+    state = Column(String(64), nullable=True)
+    error_kind = Column(String(64), nullable=True)
+    error_message = Column(Text, nullable=True)
+    detail = Column(Text, nullable=True)
+    network_path = Column(String(64), nullable=True)
+    payload = Column(Text, nullable=True)
+
+    staff = relationship("RvuStaff")
+
+
 class RvuUserSettings(Base):
     __tablename__ = "rvu_user_settings"
 
