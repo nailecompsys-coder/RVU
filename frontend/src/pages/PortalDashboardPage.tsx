@@ -21,7 +21,8 @@ import {
 import PortalOpNotesPanel from "../components/PortalOpNotesPanel";
 import { fmtCalendarDateMdY, fmtDateTimeEt } from "../dates";
 
-type Tab = "scans" | "staff" | "devices" | "opnotes" | "rules" | "settings";
+type Tab = "scans" | "opnotes" | "rules" | "settings";
+type SettingsSection = "users" | "devices" | "system";
 const SCAN_PAGE_SIZE = 100;
 type AuditPreset = "today" | "yesterday" | "this_week" | "last_week" | "month" | "quarter" | "ytd" | "custom";
 type ScanSortField = "scanned" | "dos" | "patient" | "mrn" | "staff" | "rvu" | "payment" | "status";
@@ -102,8 +103,8 @@ function cptOverrideSourceLabel(source: string | null | undefined): string {
 }
 
 // ── Table shared styles ────────────────────────────────────────────────────────
-const TH = "px-3 py-2.5 text-[10px] font-bold uppercase tracking-wide text-ink-secondary whitespace-nowrap border-b-2 border-brand-border bg-surface-soft text-left";
-const TD = "px-3 py-2.5 text-sm border-b border-brand-border/60 align-top";
+const TH = "px-4 py-3 text-[10px] font-bold uppercase tracking-wide text-ink-secondary whitespace-nowrap border-b-2 border-brand-border bg-surface-soft text-left";
+const TD = "px-4 py-3 text-sm border-b border-brand-border/60 align-middle";
 const GROUP_TD = "px-3 py-2 text-[10px] font-black uppercase tracking-wide text-ink-secondary bg-surface-soft border-y border-brand-border";
 
 type LineItem = {
@@ -490,6 +491,7 @@ export default function PortalDashboardPage() {
   const [staffLoaded, setStaffLoaded] = useState(false);
   const [devicesLoaded, setDevicesLoaded] = useState(false);
   const [tab, setTab] = useState<Tab>("scans");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("users");
   const [dashboardGroupBy, setDashboardGroupBy] = useState("week");
   const [dashboardScopeProviderId, setDashboardScopeProviderId] = useState<number | null>(null);
   const [auditPreset, setAuditPreset] = useState<AuditPreset>("today");
@@ -732,7 +734,7 @@ export default function PortalDashboardPage() {
 
   useEffect(() => {
     if (!admin) return;
-    if (tab === "staff" && !staffLoaded) {
+    if (tab === "settings" && settingsSection === "users" && !staffLoaded) {
       void api.adminStaff()
         .then((st) => {
           setStaff(st.staff.slice().sort(sortStaffMembers));
@@ -740,7 +742,7 @@ export default function PortalDashboardPage() {
         })
         .catch(() => {});
     }
-    if (tab === "devices" && !devicesLoaded) {
+    if (tab === "settings" && settingsSection === "devices" && !devicesLoaded) {
       void api.listDevices()
         .then((dv) => {
           setDevices(dv.devices);
@@ -759,7 +761,7 @@ export default function PortalDashboardPage() {
     if (tab === "rules" && !cptRulesLoaded) {
       void loadCptRules("", { overridesOnly: cptOverridesOnly, usedOnly: cptUsedOnly });
     }
-  }, [admin, tab, staffLoaded, devicesLoaded, modifiersLoaded, cptRulesLoaded, cptOverridesOnly, cptUsedOnly]);
+  }, [admin, tab, settingsSection, staffLoaded, devicesLoaded, modifiersLoaded, cptRulesLoaded, cptOverridesOnly, cptUsedOnly]);
 
   useEffect(() => {
     if (!admin || admin.role !== "superadmin") return;
@@ -1095,11 +1097,15 @@ export default function PortalDashboardPage() {
 
   const navItems: { id: Tab; label: string }[] = [
     { id: "scans", label: "Scans" },
-    { id: "staff", label: "Staff" },
-    { id: "devices", label: "Devices" },
     { id: "rules", label: "CPT / Modifier" },
     { id: "opnotes", label: "OP notes" },
     { id: "settings", label: "Settings" },
+  ];
+
+  const settingsItems: { id: SettingsSection; label: string }[] = [
+    { id: "users", label: "Users" },
+    { id: "devices", label: "Devices" },
+    { id: "system", label: "System" },
   ];
 
   return (
@@ -1576,8 +1582,30 @@ export default function PortalDashboardPage() {
           </div>
         )}
 
-        {/* ══════════════ STAFF TAB ══════════════ */}
-        {tab === "staff" && (
+        {tab === "settings" && (
+          <div className="mb-5">
+            <div className="mb-4">
+              <h2 className="text-xl font-black text-ink">Settings</h2>
+            </div>
+            <div className="card p-1 inline-flex flex-wrap gap-1">
+              {settingsItems.map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setSettingsSection(id)}
+                  className={`px-4 py-2 rounded-xl text-sm font-bold transition-colors ${
+                    settingsSection === id ? "bg-ink text-white shadow-sm" : "text-ink-secondary hover:bg-surface-soft hover:text-ink"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════ SETTINGS / USERS ══════════════ */}
+        {tab === "settings" && settingsSection === "users" && (
           <div>
             {!staffLoaded && (
               <div className="card px-4 py-3 mb-4 inline-flex items-center gap-3 text-sm text-ink-secondary">
@@ -1586,7 +1614,10 @@ export default function PortalDashboardPage() {
               </div>
             )}
             <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-ink-secondary">Manage all users — mobile access, portal access, contact details, role, and deactivation.</p>
+              <div>
+                <h3 className="text-base font-black text-ink">Users</h3>
+                <p className="text-sm text-ink-secondary">Mobile + portal access.</p>
+              </div>
               <button
                 onClick={() => { setShowAddForm((v) => !v); setStaffEditId(null); setAddErr(null); }}
                 className={showAddForm ? "btn-secondary" : "btn-primary"}
@@ -1598,8 +1629,8 @@ export default function PortalDashboardPage() {
             {/* Add form */}
             {showAddForm && (
               <div className="card border-2 border-brand-blue/30 p-5 mb-4">
-                <p className="label text-brand-blue mb-4">New Staff Member</p>
-                <div className="grid grid-cols-2 gap-3 mb-3">
+                <p className="label text-brand-blue mb-4">New User</p>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 mb-3">
                   {[
                     { label: "First Name *", key: "first_name" as const, placeholder: "John" },
                     { label: "Last Name *",  key: "last_name"  as const, placeholder: "Smith" },
@@ -1628,7 +1659,7 @@ export default function PortalDashboardPage() {
                     </div>
                   ))}
                 </div>
-                <div className="mb-4">
+                <div className="mb-4 max-w-xs">
                   <label className="label">Role</label>
                   <select className="input text-sm w-auto"
                     value={addDraft.staff_type ?? "physician"}
@@ -1684,7 +1715,17 @@ export default function PortalDashboardPage() {
             {staffLoaded && (
             <div className="card overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 980 }}>
+                <table className="w-full border-collapse table-fixed" style={{ minWidth: 1320 }}>
+                  <colgroup>
+                    <col className="w-[72px]" />
+                    <col className="w-[210px]" />
+                    <col className="w-[140px]" />
+                    <col className="w-[300px]" />
+                    <col className="w-[150px]" />
+                    <col className="w-[120px]" />
+                    <col className="w-[220px]" />
+                    <col className="w-[108px]" />
+                  </colgroup>
                   <thead>
                     <tr>
                       {["Order", "Name", "Role", "Email", "Phone", "Mobile", "Portal", "Actions"].map((h, i) => (
@@ -1704,7 +1745,7 @@ export default function PortalDashboardPage() {
                             {s.display_order ?? "—"}
                           </td>
                           <td className={`${TD} font-semibold`}>
-                            {s.full_name}
+                            <div className="text-ink leading-snug">{s.full_name}</div>
                             {s.suffix && <span className="text-xs text-ink-secondary ml-2">{s.suffix}</span>}
                           </td>
                           <td className={TD}>
@@ -1714,22 +1755,26 @@ export default function PortalDashboardPage() {
                           </td>
                           <td className={`${TD} text-xs`}>
                             {s.email
-                              ? <a href={`mailto:${s.email}`} className="text-brand-blue hover:underline">{s.email}</a>
-                              : <span className="badge-yellow">⚠ No email</span>}
+                              ? <a href={`mailto:${s.email}`} className="block max-w-full break-all text-brand-blue hover:underline leading-snug">{s.email}</a>
+                              : <span className="text-amber-700 font-semibold">No email</span>}
                           </td>
                           <td className={`${TD} text-xs`}>
                             {s.phone
                               ? <a href={`tel:${String(s.phone).replace(/\D/g, "")}`} className="text-brand-blue hover:underline">{formatUsPhone(s.phone)}</a>
-                              : <span className="badge-yellow">⚠ No phone</span>}
+                              : <span className="text-amber-700 font-semibold">No phone</span>}
                           </td>
                           <td className={TD}>
                             {s.is_active ? <span className="badge-green">Active</span> : <span className="badge-gray">Inactive</span>}
                           </td>
                           <td className={TD}>
-                            {s.portal_access
-                              ? <span className="badge-blue">Portal {s.portal_role ?? "admin"}</span>
-                              : <span className="badge-gray">No portal</span>}
-                            {s.portal_username && <div className="text-[10px] text-ink-secondary mt-1">{s.portal_username}</div>}
+                            {s.portal_access ? (
+                              <div className="space-y-1">
+                                <span className="badge-blue">{s.portal_role ?? "admin"}</span>
+                                {s.portal_username && <div className="max-w-full break-all text-[11px] leading-snug text-ink-secondary">{s.portal_username}</div>}
+                              </div>
+                            ) : (
+                              <span className="text-xs font-semibold text-ink-secondary">No portal access</span>
+                            )}
                           </td>
                           <td className={`${TD} text-right`}>
                             <span className="inline-flex gap-2">
@@ -1744,16 +1789,16 @@ export default function PortalDashboardPage() {
                         isEditing && (
                           <tr key={`staff-edit-${s.id}`} className="bg-brand-muted/60">
                             <td colSpan={8} className="px-4 py-3">
-                              <div className="flex flex-wrap gap-3 items-end">
+                              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                                 {[
                                   { label: "First Name", key: "first_name" as const },
                                   { label: "Last Name",  key: "last_name"  as const },
                                   { label: "Suffix",     key: "suffix"     as const, placeholder: "MD, PA-C…" },
-                                  { label: "Email",      key: "email"      as const, type: "email" },
+                                  { label: "Email",      key: "email"      as const, type: "email", wide: true },
                                   { label: "Phone",      key: "phone"      as const, type: "tel", placeholder: "(555) 555-1212" },
                                   { label: "Order",      key: "display_order" as const, type: "number", placeholder: "10" },
-                                ].map(({ label, key, placeholder, type }) => (
-                                  <div key={key} className="flex-1 min-w-[110px]">
+                                ].map(({ label, key, placeholder, type, wide }) => (
+                                  <div key={key} className={wide ? "xl:col-span-2" : ""}>
                                     <label className="label">{label}</label>
                                     <input
                                       type={type ?? "text"}
@@ -1772,9 +1817,9 @@ export default function PortalDashboardPage() {
                                     />
                                   </div>
                                 ))}
-                                <div className="flex-none">
+                                <div>
                                   <label className="label">Role</label>
-                                  <select className="input text-xs w-auto"
+                                  <select className="input text-xs"
                                     value={staffDraft.staff_type ?? "physician"}
                                     onChange={(e) => setStaffDraft((d) => ({ ...d, staff_type: e.target.value }))}
                                   >
@@ -1783,9 +1828,9 @@ export default function PortalDashboardPage() {
                                     ))}
                                   </select>
                                 </div>
-                                <div className="flex-none">
+                                <div>
                                   <label className="label">Mobile Access</label>
-                                  <select className="input text-xs w-auto"
+                                  <select className="input text-xs"
                                     value={staffDraft.is_active ? "active" : "inactive"}
                                     onChange={(e) => setStaffDraft((d) => ({ ...d, is_active: e.target.value === "active" }))}
                                   >
@@ -1793,9 +1838,9 @@ export default function PortalDashboardPage() {
                                     <option value="inactive">Inactive</option>
                                   </select>
                                 </div>
-                                <div className="flex-none">
+                                <div>
                                   <label className="label">Portal Access</label>
-                                  <select className="input text-xs w-auto"
+                                  <select className="input text-xs"
                                     value={staffDraft.portal_access ? "active" : "inactive"}
                                     onChange={(e) => setStaffDraft((d) => ({ ...d, portal_access: e.target.value === "active" }))}
                                   >
@@ -1803,9 +1848,9 @@ export default function PortalDashboardPage() {
                                     <option value="active">Can sign in</option>
                                   </select>
                                 </div>
-                                <div className="flex-none">
+                                <div>
                                   <label className="label">Portal Role</label>
-                                  <select className="input text-xs w-auto"
+                                  <select className="input text-xs"
                                     value={staffDraft.portal_role ?? "admin"}
                                     onChange={(e) => setStaffDraft((d) => ({ ...d, portal_role: e.target.value }))}
                                   >
@@ -1813,7 +1858,7 @@ export default function PortalDashboardPage() {
                                     <option value="superadmin">Superadmin</option>
                                   </select>
                                 </div>
-                                <div className="flex-1 min-w-[140px]">
+                                <div className="xl:col-span-2">
                                   <label className="label">Portal Password</label>
                                   <input
                                     type="password"
@@ -1823,7 +1868,7 @@ export default function PortalDashboardPage() {
                                     className="input text-xs"
                                   />
                                 </div>
-                                <div className="flex gap-2 items-end pb-0.5">
+                                <div className="flex items-end">
                                   <button onClick={() => void saveStaffEdit()} disabled={staffSaving} className="btn-primary text-xs px-4 py-2">
                                     {staffSaving ? <><Spinner className="w-3 h-3" /> Saving...</> : "Save"}
                                   </button>
@@ -2189,12 +2234,10 @@ export default function PortalDashboardPage() {
           </div>
         )}
 
-        {tab === "settings" && (
+        {tab === "settings" && settingsSection === "system" && (
           <div>
-            <h2 className="text-lg font-bold text-ink mb-1">Settings</h2>
-            <p className="text-sm text-ink-secondary mb-6">User access is managed in Staff.</p>
             {admin.role === "superadmin" && (
-              <div className="card mt-6 p-5 border-2 border-brand-blue/25">
+              <div className="card p-5 border-2 border-brand-blue/25">
                 <p className="label text-brand-blue mb-2">Developer AI engine (you only)</p>
                 <p className="text-xs text-ink-secondary mb-4">
                   Switch scanner vision provider for testing. Hidden from non-developer admins.
@@ -2273,7 +2316,7 @@ export default function PortalDashboardPage() {
           </div>
         )}
 
-        {tab === "devices" && (
+        {tab === "settings" && settingsSection === "devices" && (
           <div>
             {!devicesLoaded && (
               <div className="card px-4 py-3 mb-4 inline-flex items-center gap-3 text-sm text-ink-secondary">
@@ -2281,14 +2324,22 @@ export default function PortalDashboardPage() {
                 Loading devices...
               </div>
             )}
-            <p className="text-sm text-ink-secondary mb-4">
-              <strong className="text-ink">One row per staff member</strong> — the most recently used phone or browser.{" "}
-              <strong className="text-ink">Deactivate</strong> revokes access until they use a new registration link.
-            </p>
+            <div className="mb-4">
+              <h3 className="text-base font-black text-ink">Devices</h3>
+              <p className="text-sm text-ink-secondary">Registered phones and browsers.</p>
+            </div>
             {devicesLoaded && (
             <div className="card overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 580 }}>
+                <table className="w-full border-collapse table-fixed" style={{ minWidth: 1080 }}>
+                  <colgroup>
+                    <col className="w-[240px]" />
+                    <col className="w-[360px]" />
+                    <col className="w-[170px]" />
+                    <col className="w-[170px]" />
+                    <col className="w-[100px]" />
+                    <col className="w-[140px]" />
+                  </colgroup>
                   <thead>
                     <tr>
                       {["Staff", "Device", "Registered", "Last Seen", "Status", ""].map((h, i) => (
@@ -2304,11 +2355,13 @@ export default function PortalDashboardPage() {
                       const isBusy = togglingDevice === d.id;
                       return (
                         <tr key={d.id} className={`transition-opacity hover:bg-surface-soft ${d.is_active ? "" : "opacity-50"}`}>
-                          <td className={`${TD} font-semibold`}>{d.surgeon_name}</td>
-                          <td className={`${TD} max-w-[200px]`}>
-                            <div className="font-semibold text-ink text-sm">{d.device_name}</div>
+                          <td className={`${TD} font-semibold`}>
+                            <div className="leading-snug text-ink">{d.surgeon_name}</div>
+                          </td>
+                          <td className={TD}>
+                            <div className="font-semibold text-ink text-sm leading-snug break-words">{d.device_name || "Unknown device"}</div>
                             {d.user_agent && (
-                              <div className="text-[10px] text-ink-secondary truncate mt-0.5" title={d.user_agent}>{d.user_agent}</div>
+                              <div className="text-[10px] text-ink-secondary line-clamp-2 break-words mt-0.5" title={d.user_agent}>{d.user_agent}</div>
                             )}
                           </td>
                           <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{fmtDateTimeEt(d.registered_at)}</td>
