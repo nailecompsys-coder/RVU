@@ -8,6 +8,7 @@ import {
   type PortalDashboardDrilldownResponse,
   type PortalDashboardResponse,
   type PortalDashboardProvider,
+  type PortalDashboardProviderOption,
   type PortalDashboardDayGroup,
   type ModifierRule,
   type PortalScanAiRun,
@@ -23,6 +24,9 @@ import { fmtCalendarDateMdY, fmtDateTimeEt } from "../dates";
 
 type Tab = "scans" | "staff" | "devices" | "opnotes" | "rules" | "settings";
 const SCAN_PAGE_SIZE = 100;
+type AuditPreset = "today" | "yesterday" | "this_week" | "last_week" | "month" | "quarter" | "ytd" | "custom";
+type ScanSortField = "scanned" | "dos" | "patient" | "mrn" | "staff" | "rvu" | "payment" | "status";
+type SortDirection = "asc" | "desc";
 
 const fmt$ = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
@@ -252,6 +256,79 @@ function etDateKey(value: string | null | undefined): string {
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
+function dateInputKey(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function addCalendarDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function weekStart(date: Date): Date {
+  const next = new Date(date);
+  const day = next.getDay();
+  next.setDate(next.getDate() - day);
+  return next;
+}
+
+function auditPresetRange(preset: AuditPreset, todayKey: string): { start: string; end: string } {
+  const [year, month, day] = todayKey.split("-").map(Number);
+  const today = new Date(year, month - 1, day);
+  if (preset === "today" || preset === "custom") return { start: todayKey, end: todayKey };
+  if (preset === "yesterday") {
+    const yesterday = dateInputKey(addCalendarDays(today, -1));
+    return { start: yesterday, end: yesterday };
+  }
+  if (preset === "this_week") return { start: dateInputKey(weekStart(today)), end: todayKey };
+  if (preset === "last_week") {
+    const thisWeek = weekStart(today);
+    const lastWeekStart = addCalendarDays(thisWeek, -7);
+    return { start: dateInputKey(lastWeekStart), end: dateInputKey(addCalendarDays(lastWeekStart, 6)) };
+  }
+  if (preset === "quarter") {
+    const quarterMonth = Math.floor(today.getMonth() / 3) * 3;
+    return { start: dateInputKey(new Date(today.getFullYear(), quarterMonth, 1)), end: todayKey };
+  }
+  if (preset === "ytd") return { start: `${year}-01-01`, end: todayKey };
+  return { start: `${year}-${String(month).padStart(2, "0")}-01`, end: todayKey };
+}
+
+function auditRangeLabel(start: string, end: string): string {
+  if (start === end) return fmtCalendarDateMdY(start);
+  return `${fmtCalendarDateMdY(start)} - ${fmtCalendarDateMdY(end)}`;
+}
+
+function auditPresetLabel(preset: AuditPreset): string {
+  switch (preset) {
+    case "today": return "Today";
+    case "yesterday": return "Yesterday";
+    case "this_week": return "This week";
+    case "last_week": return "Last week";
+    case "month": return "This month";
+    case "quarter": return "This quarter";
+    case "ytd": return "YTD";
+    case "custom": return "Custom";
+    default: return "Range";
+  }
+}
+
+function quarterLabelForDateKey(dateKey: string): string {
+  const month = Number(dateKey.split("-")[1] || "1");
+  const quarter = Math.floor((month - 1) / 3) + 1;
+  return `Q${quarter}`;
+}
+
+function auditHeaderLabel(preset: AuditPreset, start: string, end: string): string {
+  const range = auditRangeLabel(start, end);
+  if (preset === "quarter") return `This quarter (${quarterLabelForDateKey(start)}): ${range}`;
+  return `${auditPresetLabel(preset)}: ${range}`;
+}
+
 function weekEndingLabel(periodKey: string, fallback: string): string {
   const match = periodKey.match(/^(\d{4})-W(\d{2})$/);
   if (!match) return fallback;
@@ -280,10 +357,11 @@ interface EditRowProps {
   onSave: () => void;
   onCancel: () => void;
   colCount: number;
+  providerOptions: PortalDashboardProviderOption[];
   mode?: "edit" | "add";
 }
 
-function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount, mode = "edit" }: EditRowProps) {
+function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount, providerOptions, mode = "edit" }: EditRowProps) {
   const rawCpts = (() => {
     try { return (JSON.parse(scan.cpts as string ?? "[]") as string[]).join(", "); }
     catch { return ""; }
@@ -294,6 +372,13 @@ function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount, mo
     <tr className="bg-brand-muted/60">
       <td colSpan={colCount} className="px-4 py-3">
         <div className="flex flex-wrap gap-3 items-end">
+          <div className="flex-[1.4_1_180px] min-w-[160px]">
+            <label className="label">Patient</label>
+            <input type="text" className="input text-xs" placeholder="Patient name"
+              value={draft.patient_name ?? scan.patient_name ?? ""}
+              onChange={(e) => setDraft({ ...draft, patient_name: e.target.value || null })}
+            />
+          </div>
           <div className="flex-1 min-w-[110px]">
             <label className="label">DOS</label>
             <input type="date" className="input text-xs"
@@ -308,6 +393,20 @@ function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount, mo
               onChange={(e) => setDraft({ ...draft, mrn: e.target.value || null })}
             />
           </div>
+          <div className="flex-[1.4_1_180px] min-w-[160px]">
+            <label className="label">Staff / Provider</label>
+            <select className="input text-xs"
+              value={draft.surgeon_id ?? scan.surgeon_id ?? ""}
+              onChange={(e) => setDraft({ ...draft, surgeon_id: e.target.value ? Number(e.target.value) : null })}
+            >
+              <option value="">Unassigned</option>
+              {providerOptions.map((provider) => (
+                <option key={provider.provider_id} value={provider.provider_id}>
+                  {provider.provider_name}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="flex-none">
             <label className="label">Setting</label>
             <select className="input text-xs w-auto"
@@ -316,6 +415,25 @@ function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount, mo
             >
               <option value="false">Non-Facility</option>
               <option value="true">Facility</option>
+            </select>
+          </div>
+          <div className="flex-1 min-w-[90px]">
+            <label className="label">Locality</label>
+            <input type="text" className="input text-xs" placeholder="99"
+              value={draft.locality_num ?? scan.locality_num ?? ""}
+              onChange={(e) => setDraft({ ...draft, locality_num: e.target.value || undefined })}
+            />
+          </div>
+          <div className="flex-1 min-w-[110px]">
+            <label className="label">Status</label>
+            <select className="input text-xs"
+              value={draft.scan_status ?? scan.scan_status ?? "verified"}
+              onChange={(e) => setDraft({ ...draft, scan_status: e.target.value || null })}
+            >
+              <option value="verified">Verified</option>
+              <option value="pending_review">Pending review</option>
+              <option value="needs_edit">Needs edit</option>
+              <option value="failed">Failed</option>
             </select>
           </div>
           <div className="flex-[2_1_200px] min-w-[160px]">
@@ -328,6 +446,20 @@ function EditRow({ scan, draft, setDraft, saving, onSave, onCancel, colCount, mo
                 const codes = e.target.value.split(",").map((c) => c.trim()).filter(Boolean);
                 setDraft({ ...draft, cpts: codes.length ? codes : undefined });
               }}
+            />
+          </div>
+          <div className="flex-1 min-w-[100px]">
+            <label className="label">Total RVU</label>
+            <input type="number" step="0.01" className="input text-xs"
+              value={draft.total_rvu ?? scan.total_rvu ?? 0}
+              onChange={(e) => setDraft({ ...draft, total_rvu: e.target.value === "" ? null : Number(e.target.value) })}
+            />
+          </div>
+          <div className="flex-1 min-w-[110px]">
+            <label className="label">Payment</label>
+            <input type="number" step="0.01" className="input text-xs"
+              value={draft.total_payment ?? scan.total_payment ?? 0}
+              onChange={(e) => setDraft({ ...draft, total_payment: e.target.value === "" ? null : Number(e.target.value) })}
             />
           </div>
           <div className="flex gap-2 items-center pb-0.5">
@@ -356,12 +488,18 @@ export default function PortalDashboardPage() {
   const [staffLoaded, setStaffLoaded] = useState(false);
   const [devicesLoaded, setDevicesLoaded] = useState(false);
   const [tab, setTab] = useState<Tab>("scans");
-  const [dashboardRange, setDashboardRange] = useState("month");
   const [dashboardGroupBy, setDashboardGroupBy] = useState("week");
   const [dashboardScopeProviderId, setDashboardScopeProviderId] = useState<number | null>(null);
+  const [auditPreset, setAuditPreset] = useState<AuditPreset>("today");
+  const initialAuditRange = useMemo(() => auditPresetRange("today", etDateKey(new Date().toISOString())), []);
+  const [auditStart, setAuditStart] = useState(initialAuditRange.start);
+  const [auditEnd, setAuditEnd] = useState(initialAuditRange.end);
+  const [scanSortBy, setScanSortBy] = useState<ScanSortField>("scanned");
+  const [scanSortDir, setScanSortDir] = useState<SortDirection>("desc");
   const [dashboard, setDashboard] = useState<PortalDashboardResponse | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardErr, setDashboardErr] = useState<string | null>(null);
+  const [dashboardRefreshKey, setDashboardRefreshKey] = useState(0);
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
   const [selectedProviderPeriodKey, setSelectedProviderPeriodKey] = useState<string | null>(null);
   const [periodDrilldown, setPeriodDrilldown] = useState<PortalDashboardDrilldownResponse | null>(null);
@@ -416,6 +554,14 @@ export default function PortalDashboardPage() {
   const defaultModelForProvider = (p: string) =>
     p === "openai" ? "gpt-4o-mini" : p === "anthropic" ? "claude-3-5-sonnet-latest" : p === "paddle" ? "paddleocr" : "qwen2.5vl:7b";
   const todayKey = useMemo(() => etDateKey(new Date().toISOString()), []);
+  const dashboardQueryRange = auditPreset === "today" || auditPreset === "month" || auditPreset === "quarter" || auditPreset === "ytd"
+    ? auditPreset
+    : "custom";
+  const auditDateError = auditEnd < auditStart ? "End date must be after start date." : null;
+  const auditScanOptions = useMemo(
+    () => ({ start: auditStart, end: auditEnd, providerId: dashboardScopeProviderId, sortBy: scanSortBy, sortDir: scanSortDir }),
+    [auditStart, auditEnd, dashboardScopeProviderId, scanSortBy, scanSortDir],
+  );
   const pendingModifierRules = useMemo(
     () => modifiers.filter((rule) => rule.needs_review || rule.source === "mobile"),
     [modifiers],
@@ -529,12 +675,10 @@ export default function PortalDashboardPage() {
     setBootLoading(true);
     setScansLoadingMore(false);
     setScanLoadErr(null);
-    Promise.all([api.mePortal(), api.portalScans(SCAN_PAGE_SIZE, 0, { scannedOn: todayKey })])
-      .then(([a, firstPage]) => {
+    api.mePortal()
+      .then((a) => {
         if (cancelled) return;
         setAdmin(a);
-        setScans(firstPage.scans);
-        setHasMoreScans(firstPage.has_more);
         setBootLoading(false);
       })
       .catch(() => { if (!cancelled) nav("/portal/login"); })
@@ -542,14 +686,35 @@ export default function PortalDashboardPage() {
         if (!cancelled) setBootLoading(false);
       });
     return () => { cancelled = true; };
-  }, [nav, todayKey]);
+  }, [nav]);
+
+  useEffect(() => {
+    if (!admin || auditDateError) return;
+    let cancelled = false;
+    setScansLoadingMore(false);
+    setScanLoadErr(null);
+    api.portalScans(SCAN_PAGE_SIZE, 0, auditScanOptions)
+      .then((firstPage) => {
+        if (cancelled) return;
+        setScans(firstPage.scans);
+        setHasMoreScans(firstPage.has_more);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setScans([]);
+          setHasMoreScans(false);
+          setScanLoadErr(e instanceof Error ? e.message : "Could not load scans.");
+        }
+      });
+    return () => { cancelled = true; };
+  }, [admin, auditDateError, auditScanOptions]);
 
   const loadMoreScans = async () => {
     if (scansLoadingMore || !hasMoreScans) return;
     setScansLoadingMore(true);
     setScanLoadErr(null);
     try {
-      const page = await api.portalScans(SCAN_PAGE_SIZE, scans.length, { scannedOn: todayKey });
+      const page = await api.portalScans(SCAN_PAGE_SIZE, scans.length, auditScanOptions);
       setHasMoreScans(page.has_more);
       setScans((prev) => {
         const seen = new Set(prev.map((scan) => scan.id));
@@ -606,11 +771,18 @@ export default function PortalDashboardPage() {
   }, [admin]);
 
   useEffect(() => {
-    if (!admin) return;
+    if (auditPreset === "custom") return;
+    const next = auditPresetRange(auditPreset, todayKey);
+    setAuditStart(next.start);
+    setAuditEnd(next.end);
+  }, [auditPreset, todayKey]);
+
+  useEffect(() => {
+    if (!admin || auditDateError) return;
     let cancelled = false;
     setDashboardLoading(true);
     setDashboardErr(null);
-    api.portalDashboard(dashboardRange, dashboardGroupBy, dashboardScopeProviderId)
+    api.portalDashboard(dashboardQueryRange, dashboardGroupBy, dashboardScopeProviderId, { start: auditStart, end: auditEnd })
       .then((payload) => {
         if (cancelled) return;
         setDashboard(payload);
@@ -626,7 +798,7 @@ export default function PortalDashboardPage() {
         if (!cancelled) setDashboardLoading(false);
       });
     return () => { cancelled = true; };
-  }, [admin, dashboardRange, dashboardGroupBy, dashboardScopeProviderId]);
+  }, [admin, auditDateError, dashboardQueryRange, dashboardGroupBy, dashboardScopeProviderId, auditStart, auditEnd, dashboardRefreshKey]);
 
   useEffect(() => {
     if (!admin || selectedProviderId === null || !selectedProviderPeriodKey) {
@@ -639,11 +811,13 @@ export default function PortalDashboardPage() {
     setPeriodDrilldownLoading(true);
     setPeriodDrilldownErr(null);
     api.portalDashboardDrilldown({
-      range: dashboardRange,
+      range: dashboardQueryRange,
       groupBy: dashboardGroupBy,
       providerId: selectedProviderId,
       periodKey: selectedProviderPeriodKey,
       limit: 250,
+      start: auditStart,
+      end: auditEnd,
     })
       .then((payload) => {
         if (!cancelled) setPeriodDrilldown(payload);
@@ -655,7 +829,7 @@ export default function PortalDashboardPage() {
         if (!cancelled) setPeriodDrilldownLoading(false);
       });
     return () => { cancelled = true; };
-  }, [admin, dashboardRange, dashboardGroupBy, selectedProviderId, selectedProviderPeriodKey]);
+  }, [admin, dashboardQueryRange, dashboardGroupBy, selectedProviderId, selectedProviderPeriodKey, auditStart, auditEnd]);
 
   const logout = async () => {
     await api.portalLogout();
@@ -708,6 +882,7 @@ export default function PortalDashboardPage() {
         const updated = await api.patchScan(id, editDraft);
         setScans((prev) => prev.map((s) => (s.id === id ? { ...s, ...updated } : s)));
         setPeriodDrilldown((prev) => prev ? { ...prev, scans: prev.scans.map((s) => (s.id === id ? { ...s, ...updated } : s)) } : prev);
+        setDashboardRefreshKey((key) => key + 1);
       setEditId(null); setEditMode("edit"); setEditDraft({});
     } catch (e: unknown) {
       alert("Save failed: " + (e instanceof Error ? e.message : "unknown error"));
@@ -720,22 +895,20 @@ export default function PortalDashboardPage() {
       await api.deleteScan(id);
       setScans((prev) => prev.filter((s) => s.id !== id));
       setPeriodDrilldown((prev) => prev ? { ...prev, scans: prev.scans.filter((s) => s.id !== id) } : prev);
+      setDashboardRefreshKey((key) => key + 1);
       setDeleteConfirmId(null);
     } catch (e: unknown) {
       alert("Delete failed: " + (e instanceof Error ? e.message : "unknown error"));
     } finally { setDeletingId(null); }
   };
 
-  const todayScanSummary = useMemo(() => {
+  const auditScanSummary = useMemo(() => {
     const rows: { scan: PortalScanRow; fin: ReturnType<typeof financialBreakdown> }[] = [];
     let totalRvu = 0;
     let totalPay = 0;
     let totalFacilityValue = 0;
 
     for (const s of scans) {
-      const scannedDay = s.scanned_at_et?.slice(0, 10) || etDateKey(s.scanned_at);
-      if (scannedDay !== todayKey) continue;
-
       const fin = listFinancialSummary(s);
       rows.push({ scan: s, fin });
       totalRvu += s.total_rvu ?? 0;
@@ -751,18 +924,19 @@ export default function PortalDashboardPage() {
       totalRvu,
       totalPay,
       totalFacilityValue,
-      dateKey: todayKey,
+      dateLabel: auditRangeLabel(auditStart, auditEnd),
     };
-  }, [scans, todayKey]);
+  }, [scans, auditStart, auditEnd]);
 
   const {
-    rows: todayScanRows,
-    scans: todayScans,
+    rows: auditScanRows,
+    scans: auditScans,
     totalRvu,
     totalPay,
     totalFacilityValue,
-    dateKey: todayScanDateKey,
-  } = todayScanSummary;
+    dateLabel: auditScanDateLabel,
+  } = auditScanSummary;
+  const showingTodayScans = auditPreset === "today" && auditStart === auditEnd;
 
   const groupedProviders = useMemo(() => {
     if (!dashboard) return [];
@@ -968,15 +1142,16 @@ export default function PortalDashboardPage() {
         {/* ══════════════ SCANS TAB ══════════════ */}
         {tab === "scans" && (
           <div className="flex flex-col">
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px_160px_160px] mb-4">
-              <div>
-                <h1 className="text-xl font-black text-ink tracking-tight">Practice Dashboard</h1>
-                {dashboard && (
-                  <div className="text-xs text-ink-secondary mt-1">
-                    {fmtCalendarDateMdY(dashboard.range.start)} - {fmtCalendarDateMdY(dashboard.range.end)}
+            <div className="mb-4 space-y-3">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h1 className="text-2xl font-black text-ink tracking-tight">Practice Dashboard</h1>
+                  <div className="mt-1 inline-flex items-center rounded-full border border-brand-border bg-surface px-3 py-1 text-xs font-semibold text-ink-secondary">
+                    {auditHeaderLabel(auditPreset, auditStart, auditEnd)}
                   </div>
-                )}
+                </div>
               </div>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(210px,1.4fr)_150px_145px_145px_125px_150px_125px]">
               <div>
                 <label className="label">Provider</label>
                 <select
@@ -1003,14 +1178,52 @@ export default function PortalDashboardPage() {
               </div>
               <div>
                 <label className="label">Range</label>
-                <select className="input text-xs" value={dashboardRange} onChange={(e) => setDashboardRange(e.target.value)}>
+                <select
+                  className="input text-xs"
+                  value={auditPreset}
+                  onChange={(e) => {
+                    setAuditPreset(e.target.value as AuditPreset);
+                    setSelectedProviderId(null);
+                    setSelectedProviderPeriodKey(null);
+                  }}
+                >
                   <option value="today">Today</option>
-                  <option value="7d">7 days</option>
-                  <option value="30d">30 days</option>
-                  <option value="month">Month</option>
-                  <option value="quarter">Quarter</option>
+                  <option value="yesterday">Yesterday</option>
+                  <option value="this_week">This week</option>
+                  <option value="last_week">Last week</option>
+                  <option value="month">This month</option>
+                  <option value="quarter">This quarter</option>
                   <option value="ytd">YTD</option>
+                  <option value="custom">Custom</option>
                 </select>
+              </div>
+              <div>
+                <label className="label">Start date</label>
+                <input
+                  className="input text-xs"
+                  type="date"
+                  value={auditStart}
+                  onChange={(e) => {
+                    setAuditPreset("custom");
+                    setAuditStart(e.target.value);
+                    setSelectedProviderId(null);
+                    setSelectedProviderPeriodKey(null);
+                  }}
+                />
+              </div>
+              <div>
+                <label className="label">End date</label>
+                <input
+                  className="input text-xs"
+                  type="date"
+                  value={auditEnd}
+                  onChange={(e) => {
+                    setAuditPreset("custom");
+                    setAuditEnd(e.target.value);
+                    setSelectedProviderId(null);
+                    setSelectedProviderPeriodKey(null);
+                  }}
+                />
               </div>
               <div>
                 <label className="label">Group</label>
@@ -1018,10 +1231,37 @@ export default function PortalDashboardPage() {
                   <option value="day">Day</option>
                   <option value="week">Week</option>
                   <option value="month">Month</option>
-                  <option value="quarter">Quarter</option>
+                  <option value="quarter">Quarterly</option>
                 </select>
               </div>
+              <div>
+                <label className="label">Sort</label>
+                <select className="input text-xs" value={scanSortBy} onChange={(e) => setScanSortBy(e.target.value as ScanSortField)}>
+                  <option value="scanned">Scanned</option>
+                  <option value="dos">DOS</option>
+                  <option value="patient">Patient</option>
+                  <option value="mrn">MRN</option>
+                  <option value="staff">Staff</option>
+                  <option value="rvu">Total RVU</option>
+                  <option value="payment">Payment</option>
+                  <option value="status">Status</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">Order</label>
+                <select className="input text-xs" value={scanSortDir} onChange={(e) => setScanSortDir(e.target.value as SortDirection)}>
+                  <option value="asc">Ascending</option>
+                  <option value="desc">Descending</option>
+                </select>
+              </div>
+              </div>
             </div>
+
+            {auditDateError && (
+              <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
+                {auditDateError}
+              </div>
+            )}
 
             {dashboardErr && (
               <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -1144,8 +1384,10 @@ export default function PortalDashboardPage() {
 
             <div className="order-1 mb-6">
             <div className="flex items-center justify-between gap-3 mb-3">
-              <h2 className="text-sm font-black text-ink uppercase tracking-wide">Today's Scans</h2>
-              <span className="text-xs font-semibold text-ink-secondary">{todayScanDateKey}</span>
+              <h2 className="text-sm font-black text-ink uppercase tracking-wide">
+                {showingTodayScans ? "Today's Scans" : "Audit Scans"}
+              </h2>
+              <span className="text-xs font-semibold text-ink-secondary">{auditScanDateLabel}</span>
             </div>
 
             <div className="card overflow-hidden">
@@ -1159,14 +1401,14 @@ export default function PortalDashboardPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {todayScans.length === 0 && (
+                    {auditScans.length === 0 && (
                       <tr>
-                        <td colSpan={COL_COUNT} className="px-4 py-10 text-center text-ink-secondary text-sm">
-                          No scans since midnight.
+                        <td colSpan={COL_COUNT} className="px-4 py-10 text-left text-ink-secondary text-sm">
+                          {showingTodayScans ? "No scans today." : "No scans in this audit range."}
                         </td>
                       </tr>
                     )}
-                    {todayScanRows.map(({ scan: s, fin }) => {
+                    {auditScanRows.map(({ scan: s, fin }) => {
                       const isEditing = editId === s.id;
                       const isDeleteConfirm = deleteConfirmId === s.id;
                       const isDeleting = deletingId === s.id;
@@ -1274,17 +1516,18 @@ export default function PortalDashboardPage() {
                             onSave={() => void saveEdit(s.id)}
                             onCancel={cancelEdit}
                             colCount={COL_COUNT}
+                            providerOptions={dashboard?.provider_options ?? []}
                             mode={editMode}
                           />
                         ),
                       ];
                     })}
                   </tbody>
-                  {todayScans.length > 0 && (
+                  {auditScans.length > 0 && (
                     <tfoot>
                       <tr className="bg-surface-soft">
                         <td colSpan={8} className="px-3 py-3 font-bold text-xs text-ink-secondary border-t-2 border-ink">
-                          Totals ({todayScans.length} scan{todayScans.length !== 1 ? "s" : ""})
+                          Totals ({auditScans.length} scan{auditScans.length !== 1 ? "s" : ""})
                         </td>
                         <td className="px-3 py-3 text-right font-black font-mono tabular-nums text-sm border-t-2 border-ink">{totalRvu.toFixed(2)}</td>
                         <td className="px-3 py-3 text-right font-black text-ink font-mono tabular-nums text-sm border-t-2 border-ink">{fmt$(totalFacilityValue)}</td>
@@ -1298,7 +1541,7 @@ export default function PortalDashboardPage() {
               {hasMoreScans && (
                 <div className="border-t border-brand-border bg-surface px-4 py-3 flex flex-wrap items-center justify-between gap-3">
                   <p className="text-xs text-ink-secondary">
-                    Showing {scans.length} newest scans. More are available.
+                    Showing {scans.length} scans in this range. More are available.
                   </p>
                   <button
                     type="button"
@@ -2139,6 +2382,7 @@ export default function PortalDashboardPage() {
                               onSave={() => void saveEdit(scan.id)}
                               onCancel={cancelEdit}
                               colCount={6}
+                              providerOptions={dashboard?.provider_options ?? []}
                               mode={editMode}
                             />
                           ),

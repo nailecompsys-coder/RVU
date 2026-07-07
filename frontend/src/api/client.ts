@@ -63,17 +63,24 @@ export const api = {
       body: JSON.stringify(body),
     }),
   history: () => json<{ scans: ScanRow[] }>("/api/v1/rvu/history"),
-  portalScans: (limit = 100, offset = 0, options?: { scannedOn?: string }) => {
+  portalScans: (limit = 100, offset = 0, options?: { scannedOn?: string; start?: string; end?: string; providerId?: number | null; sortBy?: string; sortDir?: string }) => {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     if (options?.scannedOn) params.set("scanned_on", options.scannedOn);
+    if (options?.start) params.set("start", options.start);
+    if (options?.end) params.set("end", options.end);
+    if (options?.providerId != null) params.set("provider_id", String(options.providerId));
+    if (options?.sortBy) params.set("sort_by", options.sortBy);
+    if (options?.sortDir) params.set("sort_dir", options.sortDir);
     return json<PortalScansResponse>(`/api/v1/portal/rvu/scans?${params.toString()}`);
   },
-  portalDashboard: (range = "month", groupBy = "week", providerId?: number | null) => {
+  portalDashboard: (range = "month", groupBy = "week", providerId?: number | null, options?: { start?: string; end?: string }) => {
     const qs = new URLSearchParams({ range, group_by: groupBy });
     if (providerId != null) qs.set("provider_id", String(providerId));
+    if (options?.start) qs.set("start", options.start);
+    if (options?.end) qs.set("end", options.end);
     return json<PortalDashboardResponse>(`/api/v1/portal/rvu/dashboard?${qs.toString()}`);
   },
-  portalDashboardDrilldown: (params: { range?: string; groupBy?: string; providerId?: number; periodKey?: string; day?: string; limit?: number }) => {
+  portalDashboardDrilldown: (params: { range?: string; groupBy?: string; providerId?: number; periodKey?: string; day?: string; limit?: number; start?: string; end?: string }) => {
     const qs = new URLSearchParams({
       range: params.range ?? "month",
       group_by: params.groupBy ?? "week",
@@ -82,6 +89,8 @@ export const api = {
     if (params.providerId != null) qs.set("provider_id", String(params.providerId));
     if (params.periodKey) qs.set("period_key", params.periodKey);
     if (params.day) qs.set("day", params.day);
+    if (params.start) qs.set("start", params.start);
+    if (params.end) qs.set("end", params.end);
     return json<PortalDashboardDrilldownResponse>(`/api/v1/portal/rvu/dashboard/drilldown?${qs.toString()}`);
   },
   portalScanDetail: (id: number) =>
@@ -569,11 +578,16 @@ export type PortalScanAiRun = {
 };
 
 export type ScanPatchBody = {
+  surgeon_id?: number | null;
   service_date?: string | null;
+  patient_name?: string | null;
   mrn?: string | null;
   locality_num?: string;
   locality_name?: string;
   facility?: boolean;
+  total_rvu?: number | null;
+  total_payment?: number | null;
+  scan_status?: string | null;
   cpts?: string[];
 };
 

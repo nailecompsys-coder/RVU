@@ -721,6 +721,17 @@ def _portal_dashboard_role_for_staff(staff: RvuStaff | None) -> str:
     return "pa" if role == "pa" else "physician"
 
 
+def _portal_dashboard_is_provider(staff: RvuStaff | None) -> bool:
+    if not staff or not bool(getattr(staff, "is_active", False)):
+        return False
+    role = _portal_dashboard_role_for_staff(staff)
+    if role == "pa":
+        return True
+    staff_type = str(getattr(staff, "staff_type", "") or "").strip().lower()
+    suffix = str(getattr(staff, "suffix", "") or "").strip().lower()
+    return staff_type in {"physician", "surgeon", "doctor"} or suffix in {"md", "m.d.", "do", "d.o."}
+
+
 def _provider_name_key(value: str | None) -> str:
     cleaned = re.sub(r"\bdr\.?\b", " ", str(value or ""), flags=re.I)
     cleaned = re.sub(r"\b(pa|pa-c|physician assistant|md|do)\b", " ", cleaned, flags=re.I)
@@ -3726,16 +3737,11 @@ def portal_dashboard(
 
     staff_rows = (
         db.query(RvuStaff)
-        .filter(
-            RvuStaff.is_active == True,  # noqa: E712
-            or_(
-                RvuStaff.staff_type.in_(["physician", "pa", "physician_assistant"]),
-                RvuStaff.suffix.ilike("%PA%"),
-            ),
-        )
+        .filter(RvuStaff.is_active == True)  # noqa: E712
         .order_by(RvuStaff.last_name, RvuStaff.first_name)
         .all()
     )
+    staff_rows = [staff for staff in staff_rows if _portal_dashboard_is_provider(staff)]
     provider_options = [
         {
             "provider_id": staff.id,
@@ -4042,6 +4048,11 @@ def portal_all_scans(
     limit: int = 100,
     offset: int = 0,
     scanned_on: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    provider_id: int | None = None,
+    sort_by: str = "scanned",
+    sort_dir: str = "desc",
 ):
     limit = min(max(limit, 1), 250)
     offset = max(offset, 0)
@@ -4080,6 +4091,9 @@ def portal_all_scans(
         )
         .outerjoin(RvuStaff, RvuStaff.id == RvuScan.surgeon_id)
     )
+    if provider_id is not None:
+        query = query.filter(RvuScan.surgeon_id == provider_id)
+
     if scanned_on:
         try:
             scan_day = date.fromisoformat(scanned_on)
@@ -4090,7 +4104,35 @@ def portal_all_scans(
         start_utc = start_et.astimezone(timezone.utc).replace(tzinfo=None)
         end_utc = end_et.astimezone(timezone.utc).replace(tzinfo=None)
         query = query.filter(RvuScan.scanned_at >= start_utc, RvuScan.scanned_at < end_utc)
-    rows = query.order_by(desc(RvuScan.scanned_at)).offset(offset).limit(limit + 1).all()
+    elif start or end:
+        if not start or not end:
+            raise HTTPException(status_code=400, detail="Start and end dates are required together")
+        try:
+            start_day = date.fromisoformat(start)
+            end_day = date.fromisoformat(end)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid scan date range") from exc
+        if end_day < start_day:
+            raise HTTPException(status_code=400, detail="End date must be after start date")
+        start_et = datetime.combine(start_day, datetime.min.time(), tzinfo=APP_TIME_ZONE)
+        end_et = datetime.combine(end_day + timedelta(days=1), datetime.min.time(), tzinfo=APP_TIME_ZONE)
+        start_utc = start_et.astimezone(timezone.utc).replace(tzinfo=None)
+        end_utc = end_et.astimezone(timezone.utc).replace(tzinfo=None)
+        query = query.filter(RvuScan.scanned_at >= start_utc, RvuScan.scanned_at < end_utc)
+    sort_columns = {
+        "scanned": RvuScan.scanned_at,
+        "dos": RvuScan.service_date,
+        "mrn": RvuScan.mrn,
+        "patient": RvuScan.patient_name,
+        "staff": staff_name,
+        "rvu": RvuScan.total_rvu,
+        "payment": RvuScan.total_payment,
+        "status": RvuScan.scan_status,
+    }
+    sort_col = sort_columns.get((sort_by or "scanned").strip().lower(), RvuScan.scanned_at)
+    sort_desc = (sort_dir or "desc").strip().lower() != "asc"
+    query = query.order_by(desc(sort_col).nullslast() if sort_desc else sort_col.asc().nullslast(), desc(RvuScan.scanned_at))
+    rows = query.offset(offset).limit(limit + 1).all()
     has_more = len(rows) > limit
     scans = [_portal_scan_list_row_dict(row) for row in rows[:limit]]
     return {
@@ -4162,12 +4204,16 @@ def portal_scan_image(
 
 
 class ScanPatch(BaseModel):
+    surgeon_id: int | None = None
     service_date: str | None = None   # "YYYY-MM-DD" or null
     patient_name: str | None = None
     mrn: str | None = None
     locality_num: str | None = None
     locality_name: str | None = None
     facility: bool | None = None
+    total_rvu: float | None = None
+    total_payment: float | None = None
+    scan_status: str | None = None
     cpts: list[str] | None = None     # replaces stored cpts JSON
     modifiers: dict[str, str] | None = None
     line_items: list[dict] | None = None
@@ -4184,6 +4230,11 @@ def portal_patch_scan(
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
 
+    if body.surgeon_id is not None:
+        staff = db.get(RvuStaff, body.surgeon_id)
+        if not staff:
+            raise HTTPException(status_code=400, detail="Staff member not found")
+        scan.surgeon_id = body.surgeon_id
     if body.service_date is not None:
         scan.service_date = payment_svc.parse_service_date(body.service_date)
     if body.patient_name is not None:
@@ -4196,6 +4247,11 @@ def portal_patch_scan(
         scan.locality_name = body.locality_name
     if body.facility is not None:
         scan.facility = body.facility
+    if body.scan_status is not None:
+        clean_status = body.scan_status.strip().lower()
+        if clean_status not in {"verified", "pending_review", "needs_edit", "failed"}:
+            raise HTTPException(status_code=400, detail="Invalid scan status")
+        scan.scan_status = clean_status
     current_cpts: list[str] | None = None
     should_recalc = any(
         value is not None
@@ -4277,6 +4333,11 @@ def portal_patch_scan(
             scan.total_rvu = 0.0
             scan.total_payment = 0.0
             scan.line_items = json.dumps([])
+    else:
+        if body.total_rvu is not None:
+            scan.total_rvu = round(float(body.total_rvu), 2)
+        if body.total_payment is not None:
+            scan.total_payment = round(float(body.total_payment), 2)
 
     db.commit()
     db.refresh(scan)
