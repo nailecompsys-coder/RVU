@@ -37,6 +37,25 @@ _DIST = os.environ.get("RVU_STATIC_DIST") or os.path.abspath(
 _SCHEMA_INIT_LOCK_ID = 3045121101
 
 
+_STAFF_DISPLAY_ORDER = [
+    ("jorge", "florin", 10),
+    ("christopher", "johnson", 20),
+    ("jason", "boardman", 30),
+    ("alexander", "schroeder", 40),
+    ("owen", "kieran", 50),
+    ("lucy", "woodley", 60),
+    ("jennine", "putnick", 70),
+    ("geoff", "yurcisin", 80),
+    ("lars", "nelson", 90),
+    ("nadia", "froehling", 100),
+    ("amy", "diehl", 110),
+    ("bailey", "florin", 120),
+    ("cindy", "nguyen", 130),
+    ("sara", "ramos", 140),
+    ("kendale", "speyerer", 150),
+]
+
+
 def _ensure_rvu_schema(conn: Connection) -> None:
     inspector = inspect(conn)
     if not inspector.has_table("rvu_scans"):
@@ -69,6 +88,23 @@ def _ensure_rvu_schema(conn: Connection) -> None:
                 text("ALTER TABLE rvu_user_settings ADD COLUMN IF NOT EXISTS annual_wrvu_goal DOUBLE PRECISION DEFAULT 9000.0")
             )
         conn.execute(text("UPDATE rvu_user_settings SET annual_wrvu_goal = 9000.0 WHERE annual_wrvu_goal IS NULL"))
+
+    if inspector.has_table("rvu_staff"):
+        staff_columns = {col["name"] for col in inspector.get_columns("rvu_staff")}
+        if "display_order" not in staff_columns:
+            conn.execute(text("ALTER TABLE rvu_staff ADD COLUMN IF NOT EXISTS display_order INTEGER"))
+        for first_name, last_name, display_order in _STAFF_DISPLAY_ORDER:
+            conn.execute(
+                text(
+                    """
+                    UPDATE rvu_staff
+                    SET display_order = :display_order
+                    WHERE lower(first_name) = :first_name
+                      AND lower(last_name) = :last_name
+                    """
+                ),
+                {"display_order": display_order, "first_name": first_name, "last_name": last_name},
+            )
 
 
 def _initialize_schema_once() -> None:

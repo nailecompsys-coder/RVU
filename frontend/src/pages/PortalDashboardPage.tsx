@@ -34,7 +34,7 @@ const fmt$ = (n: number) =>
 const fmtCompact$ = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1 });
 
-/** Physicians first, then other roles; then last / first name. */
+/** Practice seniority order first, then role and name. Blank orders stay at the bottom. */
 function sortStaffMembers(a: StaffMember, b: StaffMember): number {
   const rank = (t: string | null | undefined) => {
     const value = t?.toLowerCase();
@@ -42,6 +42,9 @@ function sortStaffMembers(a: StaffMember, b: StaffMember): number {
     if (value === "pa" || value === "physician_assistant") return 1;
     return 2;
   };
+  const order = (value: number | null | undefined) => (typeof value === "number" ? value : Number.MAX_SAFE_INTEGER);
+  const od = order(a.display_order) - order(b.display_order);
+  if (od !== 0) return od;
   const dr = rank(a.staff_type) - rank(b.staff_type);
   if (dr !== 0) return dr;
   const ln = a.last_name.localeCompare(b.last_name);
@@ -941,10 +944,12 @@ export default function PortalDashboardPage() {
   const groupedProviders = useMemo(() => {
     if (!dashboard) return [];
     const sorted = dashboard.providers.slice().sort((a, b) => {
+      const orderA = typeof a.display_order === "number" ? a.display_order : Number.MAX_SAFE_INTEGER;
+      const orderB = typeof b.display_order === "number" ? b.display_order : Number.MAX_SAFE_INTEGER;
+      const orderDiff = orderA - orderB;
+      if (orderDiff !== 0) return orderDiff;
       const roleDiff = providerRoleRank(a.role) - providerRoleRank(b.role);
       if (roleDiff !== 0) return roleDiff;
-      const wrvuDiff = b.wrvu - a.wrvu;
-      if (wrvuDiff !== 0) return wrvuDiff;
       return a.provider_name.localeCompare(b.provider_name);
     });
     const rows: Array<
@@ -1022,7 +1027,7 @@ export default function PortalDashboardPage() {
 
   const startStaffEdit = (s: StaffMember) => {
     setShowAddForm(false); setStaffEditId(s.id);
-    setStaffDraft({ first_name: s.first_name, last_name: s.last_name, suffix: s.suffix ?? "", staff_type: s.staff_type ?? "physician", email: s.email ?? "", phone: formatUsPhone(s.phone), is_active: s.is_active });
+    setStaffDraft({ first_name: s.first_name, last_name: s.last_name, suffix: s.suffix ?? "", staff_type: s.staff_type ?? "physician", email: s.email ?? "", phone: formatUsPhone(s.phone), display_order: s.display_order, is_active: s.is_active });
     setStaffErr(null);
   };
 
@@ -1167,8 +1172,6 @@ export default function PortalDashboardPage() {
                 >
                   <option value="">All practice</option>
                   {(dashboard?.provider_options ?? [])
-                    .slice()
-                    .sort((a, b) => a.provider_name.localeCompare(b.provider_name))
                     .map((provider) => (
                       <option key={provider.provider_id} value={provider.provider_id}>
                         {provider.provider_name}
@@ -1588,16 +1591,24 @@ export default function PortalDashboardPage() {
                     { label: "Suffix",       key: "suffix"     as const, placeholder: "MD, DO, PA-C…" },
                     { label: "Email",        key: "email"      as const, placeholder: "jsmith@example.com", type: "email" },
                     { label: "Phone",        key: "phone"      as const, placeholder: "(555) 555-1212", type: "tel" },
+                    { label: "Order",        key: "display_order" as const, placeholder: "10", type: "number" },
                   ].map(({ label, key, placeholder, type }) => (
                     <div key={key}>
                       <label className="label">{label}</label>
                       <input
                         type={type ?? "text"}
                         placeholder={placeholder}
-                        value={(addDraft[key] as string) ?? ""}
-                        onChange={(e) => setAddDraft((d) => ({ ...d, [key]: key === "phone" ? formatUsPhone(e.target.value) : e.target.value }))}
+                        value={(addDraft[key] as string | number | null) ?? ""}
+                        onChange={(e) => setAddDraft((d) => ({
+                          ...d,
+                          [key]: key === "phone"
+                            ? formatUsPhone(e.target.value)
+                            : key === "display_order"
+                              ? (e.target.value === "" ? null : Number(e.target.value))
+                              : e.target.value,
+                        }))}
                         className="input text-sm"
-                        inputMode={key === "phone" ? "tel" : undefined}
+                        inputMode={key === "phone" ? "tel" : key === "display_order" ? "numeric" : undefined}
                       />
                     </div>
                   ))}
@@ -1624,22 +1635,25 @@ export default function PortalDashboardPage() {
             {staffLoaded && (
             <div className="card overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 760 }}>
+                <table className="w-full border-collapse" style={{ minWidth: 840 }}>
                   <thead>
                     <tr>
-                      {["Name", "Role", "Email", "Phone", "Status", "Actions"].map((h, i) => (
-                        <th key={h} className={`${TH} ${i === 5 ? "text-right" : "text-left"}`}>{h}</th>
+                      {["Order", "Name", "Role", "Email", "Phone", "Status", "Actions"].map((h, i) => (
+                        <th key={h} className={`${TH} ${i === 6 ? "text-right" : "text-left"}`}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {staff.length === 0 && (
-                      <tr><td colSpan={6} className="px-4 py-10 text-center text-ink-secondary text-sm">No staff found.</td></tr>
+                      <tr><td colSpan={7} className="px-4 py-10 text-center text-ink-secondary text-sm">No staff found.</td></tr>
                     )}
                     {staff.map((s) => {
                       const isEditing = staffEditId === s.id;
                       return [
                         <tr key={`staff-${s.id}`} className={`transition-colors ${isEditing ? "bg-brand-muted/60" : "hover:bg-surface-soft"}`}>
+                          <td className={`${TD} font-mono tabular-nums text-xs text-ink-secondary`}>
+                            {s.display_order ?? "—"}
+                          </td>
                           <td className={`${TD} font-semibold`}>
                             {s.full_name}
                             {s.suffix && <span className="text-xs text-ink-secondary ml-2">{s.suffix}</span>}
@@ -1674,7 +1688,7 @@ export default function PortalDashboardPage() {
 
                         isEditing && (
                           <tr key={`staff-edit-${s.id}`} className="bg-brand-muted/60">
-                            <td colSpan={6} className="px-4 py-3">
+                            <td colSpan={7} className="px-4 py-3">
                               <div className="flex flex-wrap gap-3 items-end">
                                 {[
                                   { label: "First Name", key: "first_name" as const },
@@ -1682,16 +1696,24 @@ export default function PortalDashboardPage() {
                                   { label: "Suffix",     key: "suffix"     as const, placeholder: "MD, PA-C…" },
                                   { label: "Email",      key: "email"      as const, type: "email" },
                                   { label: "Phone",      key: "phone"      as const, type: "tel", placeholder: "(555) 555-1212" },
+                                  { label: "Order",      key: "display_order" as const, type: "number", placeholder: "10" },
                                 ].map(({ label, key, placeholder, type }) => (
                                   <div key={key} className="flex-1 min-w-[110px]">
                                     <label className="label">{label}</label>
                                     <input
                                       type={type ?? "text"}
                                       placeholder={placeholder}
-                                      value={(staffDraft[key] as string) ?? ""}
-                                      onChange={(e) => setStaffDraft((d) => ({ ...d, [key]: key === "phone" ? formatUsPhone(e.target.value) : e.target.value }))}
+                                      value={(staffDraft[key] as string | number | null) ?? ""}
+                                      onChange={(e) => setStaffDraft((d) => ({
+                                        ...d,
+                                        [key]: key === "phone"
+                                          ? formatUsPhone(e.target.value)
+                                          : key === "display_order"
+                                            ? (e.target.value === "" ? null : Number(e.target.value))
+                                            : e.target.value,
+                                      }))}
                                       className="input text-xs"
-                                      inputMode={key === "phone" ? "tel" : undefined}
+                                      inputMode={key === "phone" ? "tel" : key === "display_order" ? "numeric" : undefined}
                                     />
                                   </div>
                                 ))}

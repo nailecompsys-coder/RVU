@@ -493,6 +493,7 @@ export type PortalDashboardProvider = PortalDashboardMetric & {
   provider_name: string;
   role: string | null;
   is_active: boolean;
+  display_order: number | null;
   last_scan: string | null;
   top_cpt: string | null;
 };
@@ -505,6 +506,7 @@ export type PortalDashboardPeriod = PortalDashboardMetric & {
 export type PortalDashboardProviderPeriod = PortalDashboardPeriod & {
   provider_id: number;
   provider_name: string;
+  display_order: number | null;
 };
 
 export type PortalDashboardCpt = {
@@ -521,6 +523,7 @@ export type PortalDashboardProviderOption = {
   provider_name: string;
   role: string | null;
   is_active: boolean;
+  display_order: number | null;
 };
 
 export type PortalDashboardResponse = {
@@ -600,6 +603,7 @@ export type StaffMember = {
   email: string | null;
   phone: string | null;
   suffix: string | null;
+  display_order: number | null;
   is_active: boolean;
 };
 
@@ -610,6 +614,7 @@ export type StaffPatchBody = {
   staff_type?: string;
   email?: string;
   phone?: string;
+  display_order?: number | null;
   is_active?: boolean;
 };
 
@@ -631,6 +636,7 @@ export type StaffCreateBody = {
   staff_type?: string;
   email?: string;
   phone?: string;
+  display_order?: number | null;
 };
 
 export type LookupBody = {

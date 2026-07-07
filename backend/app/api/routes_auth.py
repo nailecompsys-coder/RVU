@@ -562,7 +562,7 @@ def list_staff(
         else_=2,
     )
     surgeons = (
-        q.order_by(physician_first, RvuStaff.last_name, RvuStaff.first_name).all()
+        q.order_by(RvuStaff.display_order.is_(None), RvuStaff.display_order, physician_first, RvuStaff.last_name, RvuStaff.first_name).all()
     )
     return {
         "staff": [
@@ -575,6 +575,7 @@ def list_staff(
                 "email": s.email,
                 "phone": s.phone,
                 "suffix": s.suffix,
+                "display_order": s.display_order,
                 "is_active": s.is_active,
             }
             for s in surgeons
@@ -591,6 +592,7 @@ class StaffCreateBody(BaseModel):
     staff_type: str = "physician"
     email: str | None = None
     phone: str | None = Field(None, max_length=32)
+    display_order: int | None = None
 
 
 @router.post("/admin/staff")
@@ -611,6 +613,7 @@ def create_staff(
         staff_type=_normalize_staff_type(body.staff_type),
         email=body.email.strip() if body.email else None,
         phone=_format_us_phone(body.phone),
+        display_order=body.display_order,
         is_active=True,
     )
     db.add(s)
@@ -625,6 +628,7 @@ def create_staff(
         "email": s.email,
         "phone": s.phone,
         "suffix": s.suffix,
+        "display_order": s.display_order,
         "is_active": s.is_active,
     }
 
@@ -638,6 +642,7 @@ class StaffPatchBody(BaseModel):
     staff_type: str | None = None
     email: str | None = None
     phone: str | None = Field(None, max_length=32)
+    display_order: int | None = None
     is_active: bool | None = None
 
 
@@ -670,6 +675,8 @@ def patch_staff(
         s.email = clean_email
     if body.phone is not None:
         s.phone = _format_us_phone(body.phone)
+    if "display_order" in body.model_fields_set:
+        s.display_order = body.display_order
     if body.is_active is not None:
         s.is_active = body.is_active
 
@@ -684,6 +691,7 @@ def patch_staff(
         "email": s.email,
         "phone": s.phone,
         "suffix": s.suffix,
+        "display_order": s.display_order,
         "is_active": s.is_active,
     }
 

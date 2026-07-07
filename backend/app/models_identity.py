@@ -35,6 +35,7 @@ class RvuStaff(Base):
     email = Column(String(255), unique=True)
     phone = Column(String(32))
     color = Column(String(16), default="#3b82f6")
+    display_order = Column(Integer)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, server_default=func.now())
     legacy_cal_surgeon_id = Column(Integer, unique=True)

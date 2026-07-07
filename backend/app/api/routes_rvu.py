@@ -721,6 +721,22 @@ def _portal_dashboard_role_for_staff(staff: RvuStaff | None) -> str:
     return "pa" if role == "pa" else "physician"
 
 
+def _staff_display_order(staff: RvuStaff | None) -> int | None:
+    value = getattr(staff, "display_order", None)
+    return value if isinstance(value, int) else None
+
+
+def _staff_sort_key(staff: RvuStaff | None) -> tuple[int, int, str, str]:
+    role_rank = {"physician": 0, "pa": 1}.get(_portal_dashboard_role_for_staff(staff), 2)
+    display_order = _staff_display_order(staff)
+    return (
+        display_order if display_order is not None else 9999,
+        role_rank,
+        str(getattr(staff, "last_name", "") or "").lower(),
+        str(getattr(staff, "first_name", "") or "").lower(),
+    )
+
+
 def _portal_dashboard_is_provider(staff: RvuStaff | None) -> bool:
     if not staff or not bool(getattr(staff, "is_active", False)):
         return False
@@ -1424,11 +1440,6 @@ def list_providers(
             return "pa"
         return "surgeon"
 
-    role_order = case(
-        (RvuStaff.staff_type.ilike("physician"), 0),
-        (RvuStaff.staff_type.ilike("pa"), 1),
-        else_=2,
-    )
     providers = (
         db.query(RvuStaff)
         .filter(
@@ -1438,9 +1449,9 @@ def list_providers(
                 RvuStaff.suffix.ilike("%PA%"),
             ),
         )
-        .order_by(role_order, RvuStaff.last_name, RvuStaff.first_name)
         .all()
     )
+    providers.sort(key=_staff_sort_key)
     return {
         "providers": [
             {
@@ -1448,6 +1459,7 @@ def list_providers(
                 "full_name": s.full_name,
                 "staff_type": s.staff_type,
                 "provider_role": _role_for_staff(s.staff_type),
+                "display_order": s.display_order,
             }
             for s in providers
         ]
@@ -3738,16 +3750,17 @@ def portal_dashboard(
     staff_rows = (
         db.query(RvuStaff)
         .filter(RvuStaff.is_active == True)  # noqa: E712
-        .order_by(RvuStaff.last_name, RvuStaff.first_name)
         .all()
     )
     staff_rows = [staff for staff in staff_rows if _portal_dashboard_is_provider(staff)]
+    staff_rows.sort(key=_staff_sort_key)
     provider_options = [
         {
             "provider_id": staff.id,
             "provider_name": staff.full_name,
             "role": _portal_dashboard_role_for_staff(staff),
             "is_active": bool(staff.is_active),
+            "display_order": _staff_display_order(staff),
         }
         for staff in staff_rows
     ]
@@ -3757,6 +3770,7 @@ def portal_dashboard(
             "provider_name": staff.full_name,
             "role": _portal_dashboard_role_for_staff(staff),
             "is_active": bool(staff.is_active),
+            "display_order": _staff_display_order(staff),
             "last_scan": None,
             "top_cpt": None,
             "bucket": _empty_metric_bucket(),
@@ -3808,6 +3822,7 @@ def portal_dashboard(
                 "provider_name": f"Staff #{row.surgeon_id}",
                 "role": "unknown",
                 "is_active": False,
+                "display_order": None,
                 "last_scan": None,
                 "top_cpt": None,
                 "bucket": _empty_metric_bucket(),
@@ -3824,6 +3839,7 @@ def portal_dashboard(
             {
                 "provider_id": row.surgeon_id,
                 "provider_name": provider["provider_name"],
+                "display_order": provider.get("display_order"),
                 "period_key": period_key,
                 "period_label": period_label,
                 "bucket": _empty_metric_bucket(),
@@ -3859,11 +3875,18 @@ def portal_dashboard(
             "provider_name": provider["provider_name"],
             "role": provider["role"],
             "is_active": provider["is_active"],
+            "display_order": provider.get("display_order"),
             "last_scan": provider["last_scan"],
             "top_cpt": top_cpt[0][0] if top_cpt else None,
             **metrics,
         })
-    provider_rows.sort(key=lambda item: (-float(item["wrvu"]), item["provider_name"]))
+    provider_rows.sort(
+        key=lambda item: (
+            item["display_order"] if isinstance(item.get("display_order"), int) else 9999,
+            {"physician": 0, "pa": 1}.get(str(item.get("role") or ""), 2),
+            str(item["provider_name"]).lower(),
+        )
+    )
 
     period_rows = []
     for period in periods.values():
@@ -3875,11 +3898,18 @@ def portal_dashboard(
         provider_period_rows.append({
             "provider_id": item["provider_id"],
             "provider_name": item["provider_name"],
+            "display_order": item.get("display_order"),
             "period_key": item["period_key"],
             "period_label": item["period_label"],
             **_metric_payload(item["bucket"], start_date=start_date, end_date=end_date),
         })
-    provider_period_rows.sort(key=lambda item: (item["provider_name"], item["period_key"]))
+    provider_period_rows.sort(
+        key=lambda item: (
+            item["display_order"] if isinstance(item.get("display_order"), int) else 9999,
+            str(item["provider_name"]).lower(),
+            item["period_key"],
+        )
+    )
 
     cpt_rows = _cpt_mix_payload(cpt_mix, limit=50)
 
