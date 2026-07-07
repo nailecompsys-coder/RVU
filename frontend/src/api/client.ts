@@ -622,6 +622,7 @@ export type DeviceRecord = {
   id: number;
   surgeon_id: number;
   surgeon_name: string;
+  display_order: number | null;
   device_name: string;
   user_agent: string | null;
   registered_at: string | null;

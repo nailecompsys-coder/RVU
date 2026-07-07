@@ -722,12 +722,19 @@ def list_devices(
             "id": d.id,
             "surgeon_id": d.staff_id,
             "surgeon_name": surgeon.full_name if surgeon else "Unknown",
+            "display_order": surgeon.display_order if surgeon else None,
             "device_name": d.device_name or "Unknown device",
             "user_agent": d.user_agent,
             "registered_at": d.registered_at.isoformat() if d.registered_at else None,
             "last_seen": d.last_seen.isoformat() if d.last_seen else None,
             "is_active": d.is_active,
         })
+    out.sort(
+        key=lambda row: (
+            row["display_order"] if isinstance(row.get("display_order"), int) else 9999,
+            str(row.get("surgeon_name") or "").lower(),
+        )
+    )
     return {"devices": out}
 
 
@@ -748,8 +755,11 @@ def patch_device(
     surgeon = db.get(RvuStaff, device.staff_id)
     return {
         "id": device.id,
+        "surgeon_id": device.staff_id,
         "surgeon_name": surgeon.full_name if surgeon else "Unknown",
+        "display_order": surgeon.display_order if surgeon else None,
         "device_name": device.device_name or "Unknown device",
+        "user_agent": device.user_agent,
         "registered_at": device.registered_at.isoformat() if device.registered_at else None,
         "last_seen": device.last_seen.isoformat() if device.last_seen else None,
         "is_active": device.is_active,
