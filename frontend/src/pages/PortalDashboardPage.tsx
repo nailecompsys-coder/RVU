@@ -1711,85 +1711,65 @@ export default function PortalDashboardPage() {
               </div>
             )}
 
-            {/* Staff table */}
+            {/* User list */}
             {staffLoaded && (
-            <div className="card overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse table-fixed" style={{ minWidth: 1320 }}>
-                  <colgroup>
-                    <col className="w-[72px]" />
-                    <col className="w-[210px]" />
-                    <col className="w-[140px]" />
-                    <col className="w-[300px]" />
-                    <col className="w-[150px]" />
-                    <col className="w-[120px]" />
-                    <col className="w-[220px]" />
-                    <col className="w-[108px]" />
-                  </colgroup>
-                  <thead>
-                    <tr>
-                      {["Order", "Name", "Role", "Email", "Phone", "Mobile", "Portal", "Actions"].map((h, i) => (
-                        <th key={h} className={`${TH} ${i === 7 ? "text-right" : "text-left"}`}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {staff.length === 0 && (
-                      <tr><td colSpan={8} className="px-4 py-10 text-center text-ink-secondary text-sm">No users found.</td></tr>
-                    )}
-                    {staff.map((s) => {
-                      const isEditing = staffEditId === s.id;
-                      return [
-                        <tr key={`staff-${s.id}`} className={`transition-colors ${isEditing ? "bg-brand-muted/60" : "hover:bg-surface-soft"}`}>
-                          <td className={`${TD} font-mono tabular-nums text-xs text-ink-secondary`}>
-                            {s.display_order ?? "—"}
-                          </td>
-                          <td className={`${TD} font-semibold`}>
-                            <div className="text-ink leading-snug">{s.full_name}</div>
-                            {s.suffix && <span className="text-xs text-ink-secondary ml-2">{s.suffix}</span>}
-                          </td>
-                          <td className={TD}>
-                            {s.staff_type
-                              ? <span className="badge bg-indigo-50 text-indigo-600 border border-indigo-200">{staffRoleLabel(s.staff_type)}</span>
-                              : <span className="text-ink-secondary">—</span>}
-                          </td>
-                          <td className={`${TD} text-xs`}>
-                            {s.email
-                              ? <a href={`mailto:${s.email}`} className="block max-w-full break-all text-brand-blue hover:underline leading-snug">{s.email}</a>
-                              : <span className="text-amber-700 font-semibold">No email</span>}
-                          </td>
-                          <td className={`${TD} text-xs`}>
-                            {s.phone
-                              ? <a href={`tel:${String(s.phone).replace(/\D/g, "")}`} className="text-brand-blue hover:underline">{formatUsPhone(s.phone)}</a>
-                              : <span className="text-amber-700 font-semibold">No phone</span>}
-                          </td>
-                          <td className={TD}>
-                            {s.is_active ? <span className="badge-green">Active</span> : <span className="badge-gray">Inactive</span>}
-                          </td>
-                          <td className={TD}>
-                            {s.portal_access ? (
-                              <div className="space-y-1">
-                                <span className="badge-blue">{s.portal_role ?? "admin"}</span>
-                                {s.portal_username && <div className="max-w-full break-all text-[11px] leading-snug text-ink-secondary">{s.portal_username}</div>}
-                              </div>
-                            ) : (
-                              <span className="text-xs font-semibold text-ink-secondary">No portal access</span>
-                            )}
-                          </td>
-                          <td className={`${TD} text-right`}>
-                            <span className="inline-flex gap-2">
-                              <button
-                                onClick={() => isEditing ? setStaffEditId(null) : startStaffEdit(s)}
-                                className={`text-xs font-semibold border rounded-lg px-2.5 py-1 transition-colors ${isEditing ? "bg-indigo-600 text-white border-indigo-600" : "text-indigo-600 border-indigo-200 hover:bg-indigo-50"}`}
-                              >{isEditing ? "Cancel" : "Edit"}</button>
-                            </span>
-                          </td>
-                        </tr>,
+            <div className="space-y-3">
+              {staff.length === 0 && (
+                <div className="card px-4 py-10 text-center text-ink-secondary text-sm">No users found.</div>
+              )}
+              {staff.map((s) => {
+                const isEditing = staffEditId === s.id;
+                return (
+                  <div key={`staff-${s.id}`} className={`card overflow-hidden ${isEditing ? "border-brand-blue/40 bg-brand-muted/30" : ""}`}>
+                    <div className="grid gap-3 px-4 py-4 md:grid-cols-[minmax(220px,1.2fr)_minmax(180px,1fr)_minmax(180px,1fr)_auto] md:items-center">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="font-black text-ink leading-snug">{s.full_name}</div>
+                          {s.suffix && <span className="text-xs font-semibold text-ink-secondary">{s.suffix}</span>}
+                          {s.display_order != null && <span className="text-[11px] font-mono text-ink-secondary">#{s.display_order}</span>}
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          {s.staff_type
+                            ? <span className="badge bg-indigo-50 text-indigo-600 border border-indigo-200">{staffRoleLabel(s.staff_type)}</span>
+                            : <span className="text-xs text-ink-secondary">No role</span>}
+                          {s.is_active ? <span className="badge-green">Mobile active</span> : <span className="badge-gray">Mobile inactive</span>}
+                        </div>
+                      </div>
+                      <div className="min-w-0 text-xs leading-snug">
+                        <div className="label mb-1">Contact</div>
+                        {s.email
+                          ? <a href={`mailto:${s.email}`} className="block break-all text-brand-blue hover:underline">{s.email}</a>
+                          : <span className="font-semibold text-amber-700">No email</span>}
+                        <div className="mt-1">
+                          {s.phone
+                            ? <a href={`tel:${String(s.phone).replace(/\D/g, "")}`} className="text-brand-blue hover:underline">{formatUsPhone(s.phone)}</a>
+                            : <span className="font-semibold text-amber-700">No phone</span>}
+                        </div>
+                      </div>
+                      <div className="min-w-0 text-xs leading-snug">
+                        <div className="label mb-1">Portal</div>
+                        {s.portal_access ? (
+                          <div className="space-y-1">
+                            <span className="badge-blue">{s.portal_role ?? "admin"}</span>
+                            {s.portal_username && <div className="break-all text-ink-secondary">{s.portal_username}</div>}
+                          </div>
+                        ) : (
+                          <span className="font-semibold text-ink-secondary">No portal access</span>
+                        )}
+                      </div>
+                      <div className="flex md:justify-end">
+                        <button
+                          onClick={() => isEditing ? setStaffEditId(null) : startStaffEdit(s)}
+                          className={`inline-flex text-sm font-bold border rounded-xl px-4 py-2 transition-colors ${isEditing ? "bg-indigo-600 text-white border-indigo-600" : "text-indigo-600 border-indigo-200 hover:bg-indigo-50"}`}
+                        >
+                          {isEditing ? "Cancel" : "Edit user"}
+                        </button>
+                      </div>
+                    </div>
 
-                        isEditing && (
-                          <tr key={`staff-edit-${s.id}`} className="bg-brand-muted/60">
-                            <td colSpan={8} className="px-4 py-3">
-                              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    {isEditing && (
+                      <div className="border-t border-brand-border bg-brand-muted/40 px-4 py-4">
+                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                                 {[
                                   { label: "First Name", key: "first_name" as const },
                                   { label: "Last Name",  key: "last_name"  as const },
@@ -1873,16 +1853,13 @@ export default function PortalDashboardPage() {
                                     {staffSaving ? <><Spinner className="w-3 h-3" /> Saving...</> : "Save"}
                                   </button>
                                 </div>
-                              </div>
-                              {staffErr && <p className="text-red-600 text-xs mt-2">{staffErr}</p>}
-                            </td>
-                          </tr>
-                        ),
-                      ];
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                        </div>
+                        {staffErr && <p className="text-red-600 text-xs mt-2">{staffErr}</p>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             )}
           </div>
