@@ -605,6 +605,10 @@ export type StaffMember = {
   suffix: string | null;
   display_order: number | null;
   is_active: boolean;
+  portal_user_id: number | null;
+  portal_username: string | null;
+  portal_role: string | null;
+  portal_access: boolean;
 };
 
 export type StaffPatchBody = {
@@ -616,6 +620,9 @@ export type StaffPatchBody = {
   phone?: string;
   display_order?: number | null;
   is_active?: boolean;
+  portal_access?: boolean | null;
+  portal_role?: string | null;
+  portal_password?: string;
 };
 
 export type DeviceRecord = {
@@ -638,6 +645,9 @@ export type StaffCreateBody = {
   email?: string;
   phone?: string;
   display_order?: number | null;
+  portal_access?: boolean | null;
+  portal_role?: string | null;
+  portal_password?: string;
 };
 
 export type LookupBody = {

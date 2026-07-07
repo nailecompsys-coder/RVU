@@ -80,6 +80,104 @@ def _staff_type_for_response(staff: RvuStaff) -> str | None:
     return getattr(staff, "staff_type", None)
 
 
+def _portal_user_for_staff(db: Session, staff: RvuStaff) -> RvuAdminUser | None:
+    if not staff.email:
+        return None
+    email = staff.email.strip().lower()
+    if not email:
+        return None
+    return db.query(RvuAdminUser).filter(func.lower(RvuAdminUser.email) == email).first()
+
+
+def _staff_response(db: Session, staff: RvuStaff) -> dict[str, object]:
+    portal_user = _portal_user_for_staff(db, staff)
+    return {
+        "id": staff.id,
+        "first_name": staff.first_name,
+        "last_name": staff.last_name,
+        "full_name": staff.full_name,
+        "staff_type": _staff_type_for_response(staff),
+        "email": staff.email,
+        "phone": staff.phone,
+        "suffix": staff.suffix,
+        "display_order": staff.display_order,
+        "is_active": staff.is_active,
+        "portal_user_id": portal_user.id if portal_user else None,
+        "portal_username": portal_user.username if portal_user else None,
+        "portal_role": portal_user.role if portal_user else None,
+        "portal_access": bool(portal_user and portal_user.is_active),
+    }
+
+
+def _default_portal_username(db: Session, staff: RvuStaff, email: str) -> str:
+    base = "".join(ch for ch in email.split("@", 1)[0].lower() if ch.isalnum() or ch in ("_", ".", "-")).strip(".-_")
+    if not base:
+        first = "".join(ch for ch in (staff.first_name or "").lower() if ch.isalnum())
+        last = "".join(ch for ch in (staff.last_name or "").lower() if ch.isalnum())
+        base = f"{first[:1]}{last}" or f"staff{staff.id}"
+    candidate = base[:64]
+    suffix = 2
+    while db.query(RvuAdminUser).filter(RvuAdminUser.username == candidate).first():
+        tail = f"{suffix}"
+        candidate = f"{base[:64 - len(tail)]}{tail}"
+        suffix += 1
+    return candidate
+
+
+def _apply_portal_access_for_staff(
+    db: Session,
+    staff: RvuStaff,
+    *,
+    portal_access: bool | None,
+    portal_role: str | None,
+    portal_password: str | None,
+    current_admin: RvuAdminUser,
+) -> None:
+    portal_user = _portal_user_for_staff(db, staff)
+
+    if portal_role is not None:
+        portal_role = _normalize_role(portal_role)
+
+    if portal_access is True:
+        if not staff.email:
+            raise HTTPException(status_code=400, detail="Email is required before enabling portal access.")
+        email = staff.email.strip().lower()
+        if portal_user is None:
+            if not portal_password:
+                raise HTTPException(status_code=400, detail="Password is required when enabling portal access.")
+            portal_user = RvuAdminUser(
+                username=_default_portal_username(db, staff, email),
+                email=email,
+                password_hash=hash_password(portal_password),
+                role=portal_role or "admin",
+                is_active=True,
+            )
+            db.add(portal_user)
+        else:
+            portal_user.is_active = True
+            portal_user.email = email
+            if portal_role is not None:
+                portal_user.role = portal_role
+            if portal_password:
+                portal_user.password_hash = hash_password(portal_password)
+    elif portal_access is False and portal_user is not None:
+        if portal_user.id == current_admin.id:
+            raise HTTPException(status_code=400, detail="You cannot deactivate your own portal access.")
+        others = (
+            db.query(RvuAdminUser)
+            .filter(RvuAdminUser.is_active == True, RvuAdminUser.id != portal_user.id)  # noqa: E712
+            .count()
+        )
+        if others == 0:
+            raise HTTPException(status_code=400, detail="Cannot deactivate the last active portal user.")
+        portal_user.is_active = False
+    elif portal_user is not None:
+        if portal_role is not None:
+            portal_user.role = portal_role
+        if portal_password:
+            portal_user.password_hash = hash_password(portal_password)
+
+
 class RegisterBody(BaseModel):
     token: str = Field(..., min_length=10)
 
@@ -565,21 +663,7 @@ def list_staff(
         q.order_by(RvuStaff.display_order.is_(None), RvuStaff.display_order, physician_first, RvuStaff.last_name, RvuStaff.first_name).all()
     )
     return {
-        "staff": [
-            {
-                "id": s.id,
-                "first_name": s.first_name,
-                "last_name": s.last_name,
-                "full_name": s.full_name,
-                "staff_type": _staff_type_for_response(s),
-                "email": s.email,
-                "phone": s.phone,
-                "suffix": s.suffix,
-                "display_order": s.display_order,
-                "is_active": s.is_active,
-            }
-            for s in surgeons
-        ]
+        "staff": [_staff_response(db, s) for s in surgeons]
     }
 
 
@@ -593,6 +677,9 @@ class StaffCreateBody(BaseModel):
     email: str | None = None
     phone: str | None = Field(None, max_length=32)
     display_order: int | None = None
+    portal_access: bool | None = None
+    portal_role: str | None = None
+    portal_password: str | None = Field(None, min_length=8, max_length=128)
 
 
 @router.post("/admin/staff")
@@ -602,8 +689,9 @@ def create_staff(
     admin: RvuAdminUser = Depends(get_current_admin_api),
 ):
     """Add a new surgeon/staff member."""
-    if body.email:
-        existing = db.query(RvuStaff).filter(RvuStaff.email == body.email).first()
+    clean_email = body.email.strip().lower() if body.email else None
+    if clean_email:
+        existing = db.query(RvuStaff).filter(func.lower(RvuStaff.email) == clean_email).first()
         if existing:
             raise HTTPException(status_code=409, detail="A staff member with that email already exists.")
     s = RvuStaff(
@@ -611,26 +699,24 @@ def create_staff(
         last_name=body.last_name.strip(),
         suffix=body.suffix.strip() if body.suffix else None,
         staff_type=_normalize_staff_type(body.staff_type),
-        email=body.email.strip() if body.email else None,
+        email=clean_email,
         phone=_format_us_phone(body.phone),
         display_order=body.display_order,
         is_active=True,
     )
     db.add(s)
+    db.flush()
+    _apply_portal_access_for_staff(
+        db,
+        s,
+        portal_access=body.portal_access,
+        portal_role=body.portal_role,
+        portal_password=body.portal_password,
+        current_admin=admin,
+    )
     db.commit()
     db.refresh(s)
-    return {
-        "id": s.id,
-        "first_name": s.first_name,
-        "last_name": s.last_name,
-        "full_name": s.full_name,
-        "staff_type": _staff_type_for_response(s),
-        "email": s.email,
-        "phone": s.phone,
-        "suffix": s.suffix,
-        "display_order": s.display_order,
-        "is_active": s.is_active,
-    }
+    return _staff_response(db, s)
 
 
 # ── Staff: edit ──────────────────────────────────────────────────────────────
@@ -644,6 +730,9 @@ class StaffPatchBody(BaseModel):
     phone: str | None = Field(None, max_length=32)
     display_order: int | None = None
     is_active: bool | None = None
+    portal_access: bool | None = None
+    portal_role: str | None = None
+    portal_password: str | None = Field(None, min_length=8, max_length=128)
 
 
 @router.patch("/admin/staff/{surgeon_id}")
@@ -657,6 +746,7 @@ def patch_staff(
     s = db.get(RvuStaff, surgeon_id)
     if not s:
         raise HTTPException(status_code=404, detail="Staff member not found")
+    portal_user = _portal_user_for_staff(db, s)
 
     if body.first_name is not None:
         s.first_name = body.first_name.strip()
@@ -667,33 +757,43 @@ def patch_staff(
     if body.staff_type is not None:
         s.staff_type = _normalize_staff_type(body.staff_type)
     if body.email is not None:
-        clean_email = body.email.strip() or None
+        clean_email = body.email.strip().lower() or None
         if clean_email:
-            dup = db.query(RvuStaff).filter(RvuStaff.email == clean_email, RvuStaff.id != surgeon_id).first()
+            dup = db.query(RvuStaff).filter(func.lower(RvuStaff.email) == clean_email, RvuStaff.id != surgeon_id).first()
             if dup:
                 raise HTTPException(status_code=409, detail="That email is already used by another staff member.")
         s.email = clean_email
+        if portal_user is not None:
+            if clean_email:
+                dup = db.query(RvuAdminUser).filter(RvuAdminUser.email == clean_email, RvuAdminUser.id != portal_user.id).first()
+                if dup:
+                    raise HTTPException(status_code=409, detail="That email is already used by another portal user.")
+                portal_user.email = clean_email
+            else:
+                portal_user.is_active = False
     if body.phone is not None:
         s.phone = _format_us_phone(body.phone)
     if "display_order" in body.model_fields_set:
         s.display_order = body.display_order
     if body.is_active is not None:
         s.is_active = body.is_active
+    if (
+        "portal_access" in body.model_fields_set
+        or body.portal_role is not None
+        or body.portal_password is not None
+    ):
+        _apply_portal_access_for_staff(
+            db,
+            s,
+            portal_access=body.portal_access if "portal_access" in body.model_fields_set else None,
+            portal_role=body.portal_role,
+            portal_password=body.portal_password,
+            current_admin=admin,
+        )
 
     db.commit()
     db.refresh(s)
-    return {
-        "id": s.id,
-        "first_name": s.first_name,
-        "last_name": s.last_name,
-        "full_name": s.full_name,
-        "staff_type": _staff_type_for_response(s),
-        "email": s.email,
-        "phone": s.phone,
-        "suffix": s.suffix,
-        "display_order": s.display_order,
-        "is_active": s.is_active,
-    }
+    return _staff_response(db, s)
 
 
 # ── Portal: device registry ──────────────────────────────────────────────────

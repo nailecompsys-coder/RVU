@@ -19,7 +19,6 @@ import {
   type StaffPatchBody,
 } from "../api/client";
 import PortalOpNotesPanel from "../components/PortalOpNotesPanel";
-import PortalUsersPanel from "../components/PortalUsersPanel";
 import { fmtCalendarDateMdY, fmtDateTimeEt } from "../dates";
 
 type Tab = "scans" | "staff" | "devices" | "opnotes" | "rules" | "settings";
@@ -1027,7 +1026,19 @@ export default function PortalDashboardPage() {
 
   const startStaffEdit = (s: StaffMember) => {
     setShowAddForm(false); setStaffEditId(s.id);
-    setStaffDraft({ first_name: s.first_name, last_name: s.last_name, suffix: s.suffix ?? "", staff_type: s.staff_type ?? "physician", email: s.email ?? "", phone: formatUsPhone(s.phone), display_order: s.display_order, is_active: s.is_active });
+    setStaffDraft({
+      first_name: s.first_name,
+      last_name: s.last_name,
+      suffix: s.suffix ?? "",
+      staff_type: s.staff_type ?? "physician",
+      email: s.email ?? "",
+      phone: formatUsPhone(s.phone),
+      display_order: s.display_order,
+      is_active: s.is_active,
+      portal_access: s.portal_access,
+      portal_role: s.portal_role ?? "admin",
+      portal_password: undefined,
+    });
     setStaffErr(null);
   };
 
@@ -1047,6 +1058,10 @@ export default function PortalDashboardPage() {
 
   const submitAddStaff = async () => {
     if (!addDraft.first_name.trim() || !addDraft.last_name.trim()) { setAddErr("First and last name are required."); return; }
+    if (addDraft.portal_access && (!addDraft.portal_password || addDraft.portal_password.length < 8)) {
+      setAddErr("Portal password must be at least 8 characters.");
+      return;
+    }
     setAddSaving(true); setAddErr(null);
     try {
       const created = await api.createStaff({ ...addDraft, phone: formatUsPhone(addDraft.phone) });
@@ -1571,12 +1586,12 @@ export default function PortalDashboardPage() {
               </div>
             )}
             <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-ink-secondary">Manage staff — edit names, email, phone, and roles, or add new members.</p>
+              <p className="text-sm text-ink-secondary">Manage all users — mobile access, portal access, contact details, role, and deactivation.</p>
               <button
                 onClick={() => { setShowAddForm((v) => !v); setStaffEditId(null); setAddErr(null); }}
                 className={showAddForm ? "btn-secondary" : "btn-primary"}
               >
-                {showAddForm ? "Cancel" : "+ Add Staff"}
+                {showAddForm ? "Cancel" : "+ Add User"}
               </button>
             </div>
 
@@ -1624,9 +1639,43 @@ export default function PortalDashboardPage() {
                     ))}
                   </select>
                 </div>
+                <div className="grid gap-3 md:grid-cols-3 mb-4 border-t border-brand-border pt-4">
+                  <div>
+                    <label className="label">Portal Access</label>
+                    <select
+                      className="input text-sm"
+                      value={addDraft.portal_access ? "yes" : "no"}
+                      onChange={(e) => setAddDraft((d) => ({ ...d, portal_access: e.target.value === "yes" }))}
+                    >
+                      <option value="no">No portal access</option>
+                      <option value="yes">Can sign in to portal</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Portal Role</label>
+                    <select
+                      className="input text-sm"
+                      value={addDraft.portal_role ?? "admin"}
+                      onChange={(e) => setAddDraft((d) => ({ ...d, portal_role: e.target.value }))}
+                    >
+                      <option value="admin">Admin</option>
+                      <option value="superadmin">Superadmin</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Portal Password</label>
+                    <input
+                      className="input text-sm"
+                      type="password"
+                      placeholder={addDraft.portal_access ? "required, 8+ chars" : "optional"}
+                      value={addDraft.portal_password ?? ""}
+                      onChange={(e) => setAddDraft((d) => ({ ...d, portal_password: e.target.value || undefined }))}
+                    />
+                  </div>
+                </div>
                 {addErr && <p className="text-red-600 text-xs mb-3">{addErr}</p>}
                 <button onClick={() => void submitAddStaff()} disabled={addSaving} className="btn-primary">
-                  {addSaving ? <><Spinner /> Adding…</> : "Add Staff Member"}
+                  {addSaving ? <><Spinner /> Adding...</> : "Add User"}
                 </button>
               </div>
             )}
@@ -1635,17 +1684,17 @@ export default function PortalDashboardPage() {
             {staffLoaded && (
             <div className="card overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse" style={{ minWidth: 840 }}>
+                <table className="w-full border-collapse" style={{ minWidth: 980 }}>
                   <thead>
                     <tr>
-                      {["Order", "Name", "Role", "Email", "Phone", "Status", "Actions"].map((h, i) => (
-                        <th key={h} className={`${TH} ${i === 6 ? "text-right" : "text-left"}`}>{h}</th>
+                      {["Order", "Name", "Role", "Email", "Phone", "Mobile", "Portal", "Actions"].map((h, i) => (
+                        <th key={h} className={`${TH} ${i === 7 ? "text-right" : "text-left"}`}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {staff.length === 0 && (
-                      <tr><td colSpan={7} className="px-4 py-10 text-center text-ink-secondary text-sm">No staff found.</td></tr>
+                      <tr><td colSpan={8} className="px-4 py-10 text-center text-ink-secondary text-sm">No users found.</td></tr>
                     )}
                     {staff.map((s) => {
                       const isEditing = staffEditId === s.id;
@@ -1676,6 +1725,12 @@ export default function PortalDashboardPage() {
                           <td className={TD}>
                             {s.is_active ? <span className="badge-green">Active</span> : <span className="badge-gray">Inactive</span>}
                           </td>
+                          <td className={TD}>
+                            {s.portal_access
+                              ? <span className="badge-blue">Portal {s.portal_role ?? "admin"}</span>
+                              : <span className="badge-gray">No portal</span>}
+                            {s.portal_username && <div className="text-[10px] text-ink-secondary mt-1">{s.portal_username}</div>}
+                          </td>
                           <td className={`${TD} text-right`}>
                             <span className="inline-flex gap-2">
                               <button
@@ -1688,7 +1743,7 @@ export default function PortalDashboardPage() {
 
                         isEditing && (
                           <tr key={`staff-edit-${s.id}`} className="bg-brand-muted/60">
-                            <td colSpan={7} className="px-4 py-3">
+                            <td colSpan={8} className="px-4 py-3">
                               <div className="flex flex-wrap gap-3 items-end">
                                 {[
                                   { label: "First Name", key: "first_name" as const },
@@ -1729,7 +1784,7 @@ export default function PortalDashboardPage() {
                                   </select>
                                 </div>
                                 <div className="flex-none">
-                                  <label className="label">Status</label>
+                                  <label className="label">Mobile Access</label>
                                   <select className="input text-xs w-auto"
                                     value={staffDraft.is_active ? "active" : "inactive"}
                                     onChange={(e) => setStaffDraft((d) => ({ ...d, is_active: e.target.value === "active" }))}
@@ -1738,9 +1793,39 @@ export default function PortalDashboardPage() {
                                     <option value="inactive">Inactive</option>
                                   </select>
                                 </div>
+                                <div className="flex-none">
+                                  <label className="label">Portal Access</label>
+                                  <select className="input text-xs w-auto"
+                                    value={staffDraft.portal_access ? "active" : "inactive"}
+                                    onChange={(e) => setStaffDraft((d) => ({ ...d, portal_access: e.target.value === "active" }))}
+                                  >
+                                    <option value="inactive">No portal</option>
+                                    <option value="active">Can sign in</option>
+                                  </select>
+                                </div>
+                                <div className="flex-none">
+                                  <label className="label">Portal Role</label>
+                                  <select className="input text-xs w-auto"
+                                    value={staffDraft.portal_role ?? "admin"}
+                                    onChange={(e) => setStaffDraft((d) => ({ ...d, portal_role: e.target.value }))}
+                                  >
+                                    <option value="admin">Admin</option>
+                                    <option value="superadmin">Superadmin</option>
+                                  </select>
+                                </div>
+                                <div className="flex-1 min-w-[140px]">
+                                  <label className="label">Portal Password</label>
+                                  <input
+                                    type="password"
+                                    placeholder={s.portal_access ? "leave blank to keep" : "required to enable"}
+                                    value={staffDraft.portal_password ?? ""}
+                                    onChange={(e) => setStaffDraft((d) => ({ ...d, portal_password: e.target.value || undefined }))}
+                                    className="input text-xs"
+                                  />
+                                </div>
                                 <div className="flex gap-2 items-end pb-0.5">
                                   <button onClick={() => void saveStaffEdit()} disabled={staffSaving} className="btn-primary text-xs px-4 py-2">
-                                    {staffSaving ? <><Spinner className="w-3 h-3" /> Saving…</> : "Save"}
+                                    {staffSaving ? <><Spinner className="w-3 h-3" /> Saving...</> : "Save"}
                                   </button>
                                 </div>
                               </div>
@@ -2107,8 +2192,7 @@ export default function PortalDashboardPage() {
         {tab === "settings" && (
           <div>
             <h2 className="text-lg font-bold text-ink mb-1">Settings</h2>
-            <p className="text-sm text-ink-secondary mb-6">Portal accounts for office staff (username and password).</p>
-            <PortalUsersPanel admin={admin} />
+            <p className="text-sm text-ink-secondary mb-6">User access is managed in Staff.</p>
             {admin.role === "superadmin" && (
               <div className="card mt-6 p-5 border-2 border-brand-blue/25">
                 <p className="label text-brand-blue mb-2">Developer AI engine (you only)</p>
