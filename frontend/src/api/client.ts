@@ -18,6 +18,33 @@ const authHeaders = (): Record<string, string> => {
   return t ? { Authorization: `Bearer ${t}` } : {};
 };
 
+const formatApiError = (payload: unknown, fallback: string): string => {
+  if (!payload || typeof payload !== "object") return fallback;
+  const detail = (payload as { detail?: unknown }).detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object") {
+          const msg = (item as { msg?: unknown }).msg;
+          const loc = (item as { loc?: unknown }).loc;
+          const field = Array.isArray(loc) ? String(loc[loc.length - 1] ?? "") : "";
+          if (typeof msg === "string" && field) return `${field}: ${msg}`;
+          if (typeof msg === "string") return msg;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("; ") || fallback;
+  }
+  if (detail && typeof detail === "object") {
+    const message = (detail as { message?: unknown; msg?: unknown }).message ?? (detail as { msg?: unknown }).msg;
+    if (typeof message === "string") return message;
+  }
+  return fallback;
+};
+
 const json = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const r = await fetch(path, {
     ...init,
@@ -30,7 +57,7 @@ const json = async <T>(path: string, init?: RequestInit): Promise<T> => {
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail || r.statusText);
+    throw new Error(formatApiError(err, r.statusText));
   }
   return r.json() as Promise<T>;
 };
@@ -119,7 +146,7 @@ export const api = {
     });
     if (!r.ok && r.status !== 204) {
       const err = await r.json().catch(() => ({}));
-      throw new Error((err as { detail?: string }).detail || r.statusText);
+      throw new Error(formatApiError(err, r.statusText));
     }
   },
   listPortalUsers: () => json<{ users: PortalUserRecord[] }>("/api/v1/auth/portal/users"),
@@ -138,7 +165,7 @@ export const api = {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      throw new Error((err as { detail?: string }).detail || r.statusText);
+      throw new Error(formatApiError(err, r.statusText));
     }
     return r.json() as Promise<{ ok: boolean }>;
   },
@@ -183,7 +210,7 @@ export const api = {
     });
     if (!r.ok && r.status !== 204) {
       const err = await r.json().catch(() => ({}));
-      throw new Error((err as { detail?: string }).detail || r.statusText);
+      throw new Error(formatApiError(err, r.statusText));
     }
   },
   uploadOpNote: async (blob: Blob) => {
@@ -197,7 +224,7 @@ export const api = {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      throw new Error((err as { detail?: string }).detail || r.statusText);
+      throw new Error(formatApiError(err, r.statusText));
     }
     return r.json() as Promise<{
       ok: boolean;
@@ -228,7 +255,7 @@ export const api = {
     const r = await fetch("/api/v1/rvu/commit", { method: "POST", credentials: "include", headers: authHeaders(), body: fd });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      throw new Error((err as { detail?: string }).detail || r.statusText);
+      throw new Error(formatApiError(err, r.statusText));
     }
     return r.json() as Promise<CommitResponse>;
   },
@@ -240,7 +267,7 @@ export const api = {
     const r = await fetch(url, { ...init, credentials: "include", headers: { ...authHeaders(), ...(init.headers as Record<string, string> | undefined) } });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      throw new Error((err as { detail?: string }).detail || r.statusText);
+      throw new Error(formatApiError(err, r.statusText));
     }
     const reader = r.body?.getReader();
     if (!reader) return null;

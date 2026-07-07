@@ -1046,9 +1046,23 @@ export default function PortalDashboardPage() {
 
   const saveStaffEdit = async () => {
     if (staffEditId === null) return;
+    const current = staff.find((s) => s.id === staffEditId);
+    const portalPassword = staffDraft.portal_password?.trim() || undefined;
+    if (portalPassword && portalPassword.length < 8) {
+      setStaffErr("Portal password must be at least 8 characters.");
+      return;
+    }
+    if (staffDraft.portal_access && !current?.portal_access && !portalPassword) {
+      setStaffErr("Portal password is required when enabling portal access.");
+      return;
+    }
     setStaffSaving(true); setStaffErr(null);
     try {
-      const updated = await api.patchStaff(staffEditId, { ...staffDraft, phone: formatUsPhone(staffDraft.phone) });
+      const updated = await api.patchStaff(staffEditId, {
+        ...staffDraft,
+        phone: formatUsPhone(staffDraft.phone),
+        portal_password: portalPassword,
+      });
       setStaff((prev) =>
         prev.map((s) => (s.id === staffEditId ? { ...s, ...updated } : s)).sort(sortStaffMembers)
       );
