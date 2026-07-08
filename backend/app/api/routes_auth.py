@@ -20,6 +20,7 @@ from app.auth import (
     generate_magic_link_token,
     hash_password,
     redeem_magic_link,
+    _parse_device_name,
     verify_password,
 )
 from app.models_identity import RvuAdminUser, RvuStaff
@@ -78,6 +79,14 @@ def _staff_type_for_response(staff: RvuStaff) -> str | None:
     if staff_type == "staff" and ("pa" in suffix or "physician assistant" in suffix):
         return "pa"
     return getattr(staff, "staff_type", None)
+
+
+def _device_name_for_response(device_name: str | None, user_agent: str | None) -> str:
+    existing = str(device_name or "").strip()
+    if existing and existing.lower() not in {"unknown", "unknown device"}:
+        return existing
+    parsed = _parse_device_name(user_agent or "")
+    return parsed if parsed != "Unknown Device" else "Registered device"
 
 
 def _portal_user_for_staff(db: Session, staff: RvuStaff) -> RvuAdminUser | None:
@@ -823,7 +832,7 @@ def list_devices(
             "surgeon_id": d.staff_id,
             "surgeon_name": surgeon.full_name if surgeon else "Unknown",
             "display_order": surgeon.display_order if surgeon else None,
-            "device_name": d.device_name or "Unknown device",
+            "device_name": _device_name_for_response(d.device_name, d.user_agent),
             "user_agent": d.user_agent,
             "registered_at": d.registered_at.isoformat() if d.registered_at else None,
             "last_seen": d.last_seen.isoformat() if d.last_seen else None,
@@ -858,7 +867,7 @@ def patch_device(
         "surgeon_id": device.staff_id,
         "surgeon_name": surgeon.full_name if surgeon else "Unknown",
         "display_order": surgeon.display_order if surgeon else None,
-        "device_name": device.device_name or "Unknown device",
+        "device_name": _device_name_for_response(device.device_name, device.user_agent),
         "user_agent": device.user_agent,
         "registered_at": device.registered_at.isoformat() if device.registered_at else None,
         "last_seen": device.last_seen.isoformat() if device.last_seen else None,

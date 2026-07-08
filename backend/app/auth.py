@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -180,7 +181,18 @@ def create_or_refresh_surgeon_device_session(
 
 
 def _parse_device_name(ua: str) -> str:
+    ua = (ua or "").strip()
     ua_lower = ua.lower()
+    rvu_match = re.search(r"rvu(?:%20|\s)+insight/([0-9A-Za-z_.-]+)", ua, re.IGNORECASE)
+    if rvu_match:
+        return f"iOS RVU app build {rvu_match.group(1)}"
+    legacy_match = re.search(r"calnative/([0-9A-Za-z_.-]+)", ua, re.IGNORECASE)
+    if legacy_match:
+        return f"iOS RVU legacy build {legacy_match.group(1)}"
+    if "cfnetwork" in ua_lower and "darwin" in ua_lower:
+        return "iOS app"
+    if "okhttp" in ua_lower:
+        return "Android app"
     if "iphone" in ua_lower:
         return "iPhone"
     if "ipad" in ua_lower:

@@ -2349,11 +2349,8 @@ export default function PortalDashboardPage() {
                           <td className={`${TD} font-semibold`}>
                             <div className="leading-snug text-ink">{d.surgeon_name}</div>
                           </td>
-                          <td className={TD}>
+                          <td className={TD} title={d.user_agent ?? undefined}>
                             <div className="font-semibold text-ink text-sm leading-snug break-words">{d.device_name || "Unknown device"}</div>
-                            {d.user_agent && (
-                              <div className="text-[10px] text-ink-secondary line-clamp-2 break-words mt-0.5" title={d.user_agent}>{d.user_agent}</div>
-                            )}
                           </td>
                           <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{fmtDateTimeEt(d.registered_at)}</td>
                           <td className={`${TD} text-xs text-ink-secondary whitespace-nowrap`}>{d.last_seen ? fmtDateTimeEt(d.last_seen) : "Never"}</td>
