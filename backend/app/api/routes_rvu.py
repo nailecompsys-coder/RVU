@@ -3505,7 +3505,11 @@ def staff_list_cpt_library(
     db: Session = Depends(get_db),
     _auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
-    return {"cpts": list_cpt_catalog(db, search)}
+    # Require a search term so mobile never pulls the full CMS catalog in one response.
+    term = str(search or "").strip()
+    if len(term) < 2:
+        return {"cpts": []}
+    return {"cpts": list_cpt_catalog(db, term)}
 
 
 @router.patch("/cpt-library/{cpt}")
