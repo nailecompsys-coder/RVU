@@ -45,7 +45,7 @@ class DashboardStatsHelperTests(unittest.TestCase):
         self.assertEqual(prev_start, date(2026, 6, 1))
         self.assertEqual(prev_end, date(2026, 6, 30))
 
-    def test_scan_work_payment_prefers_stored_line_payment(self):
+    def test_scan_work_payment_uses_wrvu_times_cf_not_stored_payment(self):
         row = scan(
             service_date=date(2026, 6, 1),
             lines=[
@@ -54,7 +54,8 @@ class DashboardStatsHelperTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(_scan_work_payment(row, 41.0), 750.0)
+        # Stale stored payments (750) must not win over live CF math (15 × 41).
+        self.assertEqual(_scan_work_payment(row, 41.0), 615.0)
 
     def test_scan_work_payment_falls_back_to_configured_cf(self):
         row = scan(service_date=date(2026, 6, 1), total_rvu=8.0)
@@ -81,31 +82,31 @@ class DashboardStatsHelperTests(unittest.TestCase):
         self.assertEqual(best["cases"], 2)
         self.assertEqual(best["wrvu"], 10.0)
 
-    def test_top_cpt_contribution_uses_estimated_payment_percent(self):
+    def test_top_cpt_contribution_uses_wrvu_times_cf(self):
         rows = [
             scan(
                 service_date=date(2026, 6, 1),
                 lines=[
-                    {"cpt": "47562", "procedure_name": "Lap chole", "work_rvu": 10.0, "work_payment": 500.0},
-                    {"cpt": "44970", "procedure_name": "Lap appendix", "work_rvu": 5.0, "work_payment": 250.0},
+                    {"cpt": "47562", "procedure_name": "Lap chole", "work_rvu": 10.0, "work_payment": 999.0},
+                    {"cpt": "44970", "procedure_name": "Lap appendix", "work_rvu": 5.0, "work_payment": 999.0},
                 ],
             )
         ]
 
-        top = _build_top_cpt_contribution(rows, total_payment=1000.0)
+        top = _build_top_cpt_contribution(rows, total_payment=615.0, cf=41.0)
 
         self.assertEqual(top[0]["cpt"], "47562")
-        self.assertEqual(top[0]["est_payment"], 500.0)
-        self.assertEqual(top[0]["revenue_percent"], 50.0)
+        self.assertEqual(top[0]["est_payment"], 410.0)
+        self.assertEqual(top[0]["revenue_percent"], 66.7)
 
     def test_setting_breakdown_returns_dollars_with_wrvu(self):
         facility = scan(
             service_date=date(2026, 7, 1),
-            lines=[{"cpt": "47562", "work_rvu": 10.0, "work_payment": 410.0}],
+            lines=[{"cpt": "47562", "work_rvu": 10.0, "work_payment": 999.0}],
         )
         non_facility = scan(
             service_date=date(2026, 7, 2),
-            lines=[{"cpt": "99214", "work_rvu": 2.0, "work_payment": 82.0}],
+            lines=[{"cpt": "99214", "work_rvu": 2.0, "work_payment": 999.0}],
         )
         non_facility.facility = False
         pending = scan(
@@ -114,7 +115,7 @@ class DashboardStatsHelperTests(unittest.TestCase):
             lines=[{"cpt": "99215", "work_rvu": 99.0, "work_payment": 999.0}],
         )
 
-        breakdown = _build_setting_breakdown([facility, non_facility, pending])
+        breakdown = _build_setting_breakdown([facility, non_facility, pending], cf=41.0)
 
         self.assertEqual(breakdown[0]["label"], "Facility")
         self.assertEqual(breakdown[0]["count"], 1)

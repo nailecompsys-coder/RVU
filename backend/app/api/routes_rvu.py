@@ -298,12 +298,13 @@ def _scan_wrvu(scan: RvuScan) -> float:
 
 
 def _scan_work_payment(scan: RvuScan, cf: float | None = None) -> float:
-    line_items = _primary_line_items(_parse_line_items(scan.line_items))
-    if line_items:
-        has_work_payment = any(item.get("work_payment") is not None for item in line_items)
-        if has_work_payment:
-            return round(sum(float(item.get("work_payment") or 0.0) for item in line_items), 2)
-    return round(_scan_wrvu(scan) * float(cf or scan.cf or APP_CF_DEFAULT), 2)
+    """Estimate scan dollars as primary-line wRVU × conversion factor.
+
+    Dashboard/stats must not prefer frozen stored `work_payment`, which drifts
+    from live CF and makes CURRENT VALUE disagree with PROJECTED VALUE.
+    """
+    rate = float(cf if cf is not None else (scan.cf or APP_CF_DEFAULT))
+    return round(_scan_wrvu(scan) * rate, 2)
 
 
 def _review_reason_from_scan_fields(
@@ -2943,7 +2944,7 @@ def _annualized_run_rate(value: float, start: date, end: date) -> float:
     return round((value / elapsed_days) * 365, 2)
 
 
-def _build_monthly_trend(scans: list[RvuScan], today: date) -> list[dict[str, object]]:
+def _build_monthly_trend(scans: list[RvuScan], today: date, cf: float | None = None) -> list[dict[str, object]]:
     months: list[tuple[int, int]] = []
     year = today.year
     month = today.month
@@ -2968,17 +2969,18 @@ def _build_monthly_trend(scans: list[RvuScan], today: date) -> list[dict[str, ob
                 "label": datetime(year, month, 1).strftime("%b"),
                 "cases": len(month_scans),
                 "wrvu": _sum_wrvu(month_scans),
-                "compensation": _sum_surgeon_value(month_scans),
+                "compensation": _sum_surgeon_value(month_scans, cf),
             }
         )
     return trend
 
 
-def _build_procedure_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
+def _build_procedure_breakdown(scans: list[RvuScan], cf: float | None = None) -> list[dict[str, object]]:
     grouped: dict[str, dict[str, object]] = {}
     for scan in scans:
         if not _is_verified_scan(scan):
             continue
+        rate = float(cf if cf is not None else (scan.cf or APP_CF_DEFAULT))
         for item in _primary_line_items(_parse_line_items(scan.line_items)):
             code = str(item.get("cpt") or "").strip()
             if not code:
@@ -2998,18 +3000,20 @@ def _build_procedure_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
             wrvu = float(item.get("work_rvu") or item.get("total_rvu") or 0.0)
             bucket["count"] = int(bucket["count"]) + 1
             bucket["wrvu"] = round(float(bucket["wrvu"]) + wrvu, 2)
-            bucket["est_payment"] = round(
-                float(bucket["est_payment"])
-                + float(item.get("work_payment") if item.get("work_payment") is not None else wrvu * float(scan.cf or APP_CF_DEFAULT)),
-                2,
-            )
+            bucket["est_payment"] = round(float(bucket["est_payment"]) + (wrvu * rate), 2)
     rows = list(grouped.values())
     rows.sort(key=lambda item: (-float(item["wrvu"]), -int(item["count"]), str(item["cpt"])))
     return rows[:10]
 
 
-def _build_top_cpt_contribution(scans: list[RvuScan], *, total_payment: float | None = None, limit: int = 3) -> list[dict[str, object]]:
-    rows = _build_procedure_breakdown(scans)
+def _build_top_cpt_contribution(
+    scans: list[RvuScan],
+    *,
+    total_payment: float | None = None,
+    limit: int = 3,
+    cf: float | None = None,
+) -> list[dict[str, object]]:
+    rows = _build_procedure_breakdown(scans, cf=cf)
     denominator = total_payment if total_payment is not None else sum(float(row.get("est_payment") or 0.0) for row in rows)
     top_rows = sorted(rows, key=lambda item: (-float(item.get("est_payment") or 0.0), -float(item.get("wrvu") or 0.0), str(item.get("cpt") or "")))[:limit]
     return [
@@ -3021,7 +3025,7 @@ def _build_top_cpt_contribution(scans: list[RvuScan], *, total_payment: float | 
     ]
 
 
-def _build_setting_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
+def _build_setting_breakdown(scans: list[RvuScan], cf: float | None = None) -> list[dict[str, object]]:
     grouped = {
         "Facility": {"label": "Facility", "count": 0, "wrvu": 0.0, "compensation": 0.0},
         "Non-Facility": {"label": "Non-Facility", "count": 0, "wrvu": 0.0, "compensation": 0.0},
@@ -3032,7 +3036,7 @@ def _build_setting_breakdown(scans: list[RvuScan]) -> list[dict[str, object]]:
         key = "Facility" if bool(scan.facility) else "Non-Facility"
         grouped[key]["count"] += 1
         grouped[key]["wrvu"] = round(float(grouped[key]["wrvu"]) + _scan_wrvu(scan), 2)
-        grouped[key]["compensation"] = round(float(grouped[key]["compensation"]) + _scan_work_payment(scan), 2)
+        grouped[key]["compensation"] = round(float(grouped[key]["compensation"]) + _scan_work_payment(scan, cf), 2)
     return [grouped["Facility"], grouped["Non-Facility"]]
 
 
@@ -3217,8 +3221,8 @@ def staff_stats(
     gap_to_goal_wrvu = round(annual_goal - annualized_wrvu, 2)
     seven_day_wrvu = _sum_wrvu(seven_day_scans)
     previous_seven_day_wrvu = _sum_wrvu(previous_seven_day_scans)
-    procedure_breakdown = _build_procedure_breakdown(period_scans)
-    top_cpts = _build_top_cpt_contribution(period_scans, total_payment=estimated_compensation, limit=3)
+    procedure_breakdown = _build_procedure_breakdown(period_scans, cf=cf)
+    top_cpts = _build_top_cpt_contribution(period_scans, total_payment=estimated_compensation, limit=3, cf=cf)
     return {
         "range": range_key,
         "pending_count": pending_count,
@@ -3259,9 +3263,9 @@ def staff_stats(
         "best_clinic_day_this_month": _build_best_day_this_month(all_scans, today, "clinic"),
         "prior_year_delta_wrvu": _trend_delta(ytd_wrvu, prior_ytd_wrvu),
         "prior_year_delta_percent": _trend_percent(ytd_wrvu, prior_ytd_wrvu),
-        "monthly_trend": _build_monthly_trend(all_scans, today),
+        "monthly_trend": _build_monthly_trend(all_scans, today, cf=cf),
         "procedure_breakdown": procedure_breakdown,
-        "setting_breakdown": _build_setting_breakdown(period_scans),
+        "setting_breakdown": _build_setting_breakdown(period_scans, cf=cf),
     }
 
 
