@@ -113,9 +113,8 @@ COMMERCIAL_CONSULT_OVERRIDES: dict[str, RvuRow] = {
 }
 
 PRACTICE_RVU_OVERRIDES: dict[str, RvuRow] = {
-    # MFS compensation reconciliation uses 9.30 wRVU for laparoscopic initial
-    # inguinal hernia repair; modifier -50 is applied on top of that base.
-    "49650": RvuRow("Lap ing hernia repair init", 9.30, 4.87, 4.87, 1.63),
+    # Intentionally empty. Prior 49650 → 9.30 baked bilateral (6.2×1.5) into the
+    # base; CMS published work RVU is 6.2 and modifier -50 applies at calc time.
 }
 
 

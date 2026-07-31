@@ -11,12 +11,13 @@ def _empty_db_session():
     return db
 
 
-def test_builtin_practice_override_is_flagged_in_catalog():
+def test_49650_uses_cms_published_work_rvu_without_practice_override():
     catalog = get_effective_cpt_catalog(_empty_db_session())
 
     row = catalog["49650"]
 
     assert row["cpt"] == "49650"
-    assert row["has_override"] is True
-    assert row["override_source"] == "practice"
-    assert row["status"] == "override"
+    assert row["work_rvu"] == 6.2
+    assert row["has_override"] is False
+    assert row["override_source"] in (None, "", "cms")
+    assert row["status"] != "override"

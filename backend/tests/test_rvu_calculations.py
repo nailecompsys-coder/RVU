@@ -5,13 +5,21 @@ from app.services.rvu_payment_service import RvuPaymentService
 
 
 class RvuCalculationTests(unittest.TestCase):
+    def test_49650_base_matches_cms_published_work_rvu(self):
+        row = calc_payment("49650", "99", True, 41.0, modifier="")
+
+        self.assertEqual(row.work_rvu, 6.2)
+        self.assertEqual(row.total_rvu, 6.2)
+        self.assertEqual(row.work_payment, 254.2)
+        self.assertEqual(row.payment, 254.2)
+
     def test_49650_modifier_50_matches_capture_editor_expected_value(self):
         row = calc_payment("49650", "99", True, 41.0, modifier="50")
 
-        self.assertEqual(row.work_rvu, 13.95)
-        self.assertEqual(row.total_rvu, 13.95)
-        self.assertEqual(row.work_payment, 571.95)
-        self.assertEqual(row.payment, 571.95)
+        self.assertEqual(row.work_rvu, 9.3)
+        self.assertEqual(row.total_rvu, 9.3)
+        self.assertEqual(row.work_payment, 381.3)
+        self.assertEqual(row.payment, 381.3)
         self.assertEqual(row.modifier_code, "50")
 
     def test_modifier_50_uses_work_rvu_compensation(self):
@@ -30,8 +38,8 @@ class RvuCalculationTests(unittest.TestCase):
         self.assertEqual(row.modifier, "AS,50")
         self.assertEqual(row.modifier_code, "AS,50")
         self.assertAlmostEqual(row.modifier_factor, 0.3)
-        self.assertEqual(row.work_rvu, 2.79)
-        self.assertEqual(row.work_payment, 114.39)
+        self.assertEqual(row.work_rvu, 1.86)
+        self.assertEqual(row.work_payment, 76.26)
 
     def test_service_rows_sum_modified_work_payment(self):
         svc = RvuPaymentService()
@@ -60,8 +68,8 @@ class RvuCalculationTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["modifier"], "AS,50")
         self.assertEqual(rows[0]["modifier_code"], "AS,50")
-        self.assertEqual(rows[0]["work_rvu"], 2.79)
-        self.assertEqual(total, 114.39)
+        self.assertEqual(rows[0]["work_rvu"], 1.86)
+        self.assertEqual(total, 76.26)
 
     def test_enriched_manual_modifier_line_keeps_calculated_payment(self):
         svc = RvuPaymentService()
@@ -82,7 +90,7 @@ class RvuCalculationTests(unittest.TestCase):
         self.assertEqual(enriched[0]["modifier"], "50")
         self.assertEqual(enriched[0]["provider_name"], "Chris Johnson")
         self.assertFalse(enriched[0]["is_assist"])
-        self.assertEqual(enriched[0]["payment"], 571.95)
+        self.assertEqual(enriched[0]["payment"], 381.3)
 
     def test_enriched_manual_multi_modifier_pa_line_is_not_duplicated(self):
         svc = RvuPaymentService()
@@ -99,13 +107,13 @@ class RvuCalculationTests(unittest.TestCase):
         rows, total = svc.build_rows_from_lines(lines, "99", True, 41.0)
         enriched = svc.enrich_line_items(rows, lines)
 
-        self.assertEqual(total, 114.39)
+        self.assertEqual(total, 76.26)
         self.assertEqual(len(enriched), 1)
         self.assertEqual(enriched[0]["modifier"], "AS,50")
         self.assertEqual(enriched[0]["provider_name"], "Lucy Woodley")
         self.assertEqual(enriched[0]["provider_role"], "pa")
         self.assertTrue(enriched[0]["is_assist"])
-        self.assertEqual(enriched[0]["payment"], 114.39)
+        self.assertEqual(enriched[0]["payment"], 76.26)
 
     def test_service_rows_apply_units_multiplier(self):
         svc = RvuPaymentService()
