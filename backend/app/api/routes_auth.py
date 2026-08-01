@@ -1,10 +1,10 @@
 """Registration (magic link), staff OTP, and portal login — JSON + httpOnly cookies."""
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -23,7 +23,7 @@ from app.auth import (
     _parse_device_name,
     verify_password,
 )
-from app.models_identity import RvuAdminUser, RvuStaff
+from app.models_identity import RvuAdminUser, RvuStaff, RvuStaffOtp
 from app.database import get_db
 from app.services import email_service
 from app.services.email_service import send_magic_link_email, send_notification_email
@@ -32,8 +32,6 @@ from app.services.sms_service import send_sms
 from .deps import get_current_staff
 
 _email_executor = ThreadPoolExecutor(max_workers=2)
-_otp_lock = Lock()
-_staff_otp_store: dict[str, dict[str, object]] = {}
 _OTP_EXPIRE_MINUTES = int(os.environ.get("RVU_OTP_EXPIRE_MINUTES", "10"))
 _OTP_DEV_CODE = os.environ.get("RVU_OTP_DEV_CODE", "false").lower() in ("1", "true", "yes")
 
@@ -204,11 +202,13 @@ def _normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
-def _prune_expired_staff_otps() -> None:
+def _hash_otp_code(code: str) -> str:
+    return hashlib.sha256(code.encode()).hexdigest()
+
+
+def _prune_expired_staff_otps(db: Session) -> None:
     now = datetime.now(timezone.utc)
-    expired = [key for key, payload in _staff_otp_store.items() if payload.get("expires_at") and payload["expires_at"] <= now]
-    for key in expired:
-        _staff_otp_store.pop(key, None)
+    db.query(RvuStaffOtp).filter(RvuStaffOtp.expires_at <= now).delete(synchronize_session=False)
 
 
 @router.post("/register")
@@ -260,13 +260,22 @@ def staff_request_otp(body: StaffOtpRequestBody, db: Session = Depends(get_db)):
             code = "123456"
             dev_code = code
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=_OTP_EXPIRE_MINUTES)
-        with _otp_lock:
-            _prune_expired_staff_otps()
-            _staff_otp_store[email] = {
-                "code": code,
-                "surgeon_id": surgeon.id,
-                "expires_at": expires_at,
-            }
+        _prune_expired_staff_otps(db)
+        existing = db.query(RvuStaffOtp).filter(RvuStaffOtp.email == email).first()
+        if existing:
+            existing.staff_id = surgeon.id
+            existing.code_hash = _hash_otp_code(code)
+            existing.expires_at = expires_at
+        else:
+            db.add(
+                RvuStaffOtp(
+                    email=email,
+                    staff_id=surgeon.id,
+                    code_hash=_hash_otp_code(code),
+                    expires_at=expires_at,
+                )
+            )
+        db.commit()
         sms_sent = False
         if surgeon.phone:
             sms_sent = send_sms(
@@ -304,13 +313,22 @@ def staff_request_otp(body: StaffOtpRequestBody, db: Session = Depends(get_db)):
 def staff_verify_otp(body: StaffOtpVerifyBody, request: Request, db: Session = Depends(get_db)):
     email = _normalize_email(body.email)
     code = body.code.strip()
-    with _otp_lock:
-        _prune_expired_staff_otps()
-        payload = _staff_otp_store.get(email)
-        if not payload or str(payload.get("code") or "") != code:
-            raise HTTPException(status_code=400, detail="Invalid or expired code.")
-        surgeon_id = int(payload["surgeon_id"])
-        _staff_otp_store.pop(email, None)
+    now = datetime.now(timezone.utc)
+    _prune_expired_staff_otps(db)
+    payload = (
+        db.query(RvuStaffOtp)
+        .filter(
+            RvuStaffOtp.email == email,
+            RvuStaffOtp.code_hash == _hash_otp_code(code),
+            RvuStaffOtp.expires_at > now,
+        )
+        .first()
+    )
+    if not payload:
+        raise HTTPException(status_code=400, detail="Invalid or expired code.")
+    surgeon_id = int(payload.staff_id)
+    db.delete(payload)
+    db.commit()
 
     surgeon = db.get(RvuStaff, surgeon_id)
     if not surgeon or not surgeon.is_active:

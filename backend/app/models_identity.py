@@ -93,6 +93,19 @@ class RvuMagicLink(Base):
     staff = relationship("RvuStaff", back_populates="magic_links")
 
 
+class RvuStaffOtp(Base):
+    """Staff login OTP — DB-backed so multi-worker uvicorn shares codes."""
+
+    __tablename__ = "rvu_staff_otps"
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    staff_id = Column(Integer, ForeignKey("rvu_staff.id"), nullable=False)
+    code_hash = Column(String(255), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class RvuRuleConfig(Base):
     __tablename__ = "rvu_rule_configs"
 
