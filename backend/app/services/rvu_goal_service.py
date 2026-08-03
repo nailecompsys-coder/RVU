@@ -32,6 +32,13 @@ class MonthlyGoalPace:
     progress_percent: float
     gap_wrvu: float
     projected_month_end_wrvu: float
+    days_in_month: int
+    elapsed_days: int
+    daily_pace_wrvu: float
+    expected_to_date_wrvu: float
+    pace_progress_percent: float
+    is_on_pace: bool
+    is_goal_met: bool
 
 
 def monthly_goal_pace(*, today: date, annual_goal: float, month_to_date_wrvu: float) -> MonthlyGoalPace:
@@ -40,12 +47,25 @@ def monthly_goal_pace(*, today: date, annual_goal: float, month_to_date_wrvu: fl
     next_month_start = date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
     days_in_month = (next_month_start - month_start).days
     elapsed_days = max(today.day, 1)
-    progress_percent = round((month_to_date_wrvu / monthly_goal) * 100, 1) if monthly_goal > 0 else 0.0
+    mtd = round(float(month_to_date_wrvu), 2)
+    daily_pace = round(monthly_goal / days_in_month, 2) if days_in_month else 0.0
+    expected_to_date = round(daily_pace * elapsed_days, 2)
+    progress_percent = round((mtd / monthly_goal) * 100, 1) if monthly_goal > 0 else 0.0
+    pace_progress_percent = round((mtd / expected_to_date) * 100, 1) if expected_to_date > 0 else 0.0
+    is_goal_met = monthly_goal > 0 and mtd >= monthly_goal
+    is_on_pace = is_goal_met or (expected_to_date > 0 and mtd + 1e-9 >= expected_to_date)
 
     return MonthlyGoalPace(
         goal_wrvu=monthly_goal,
-        month_to_date_wrvu=round(float(month_to_date_wrvu), 2),
+        month_to_date_wrvu=mtd,
         progress_percent=progress_percent,
-        gap_wrvu=round(monthly_goal - month_to_date_wrvu, 2),
-        projected_month_end_wrvu=round((month_to_date_wrvu / elapsed_days) * days_in_month, 2) if elapsed_days else 0.0,
+        gap_wrvu=round(monthly_goal - mtd, 2),
+        projected_month_end_wrvu=round((mtd / elapsed_days) * days_in_month, 2) if elapsed_days else 0.0,
+        days_in_month=days_in_month,
+        elapsed_days=elapsed_days,
+        daily_pace_wrvu=daily_pace,
+        expected_to_date_wrvu=expected_to_date,
+        pace_progress_percent=pace_progress_percent,
+        is_on_pace=is_on_pace,
+        is_goal_met=is_goal_met,
     )
