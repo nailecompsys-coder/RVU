@@ -2939,6 +2939,17 @@ def _build_best_day_this_month(scans: list[RvuScan], today: date, work_type: str
     return max(grouped.values(), key=lambda item: (float(item["wrvu"]), int(item["cases"]), str(item["date"])))
 
 
+def _month_daily_wrvu_by_date(scans: list[RvuScan], today: date) -> dict[date, float]:
+    month_start = date(today.year, today.month, 1)
+    grouped: dict[date, float] = {}
+    for scan in _verified_scans_between(scans, month_start, today):
+        effective = _effective_scan_date(scan)
+        if effective is None:
+            continue
+        grouped[effective] = round(float(grouped.get(effective, 0.0)) + _scan_wrvu(scan), 2)
+    return grouped
+
+
 def _annualized_run_rate(value: float, start: date, end: date) -> float:
     elapsed_days = max((end - start).days + 1, 1)
     return round((value / elapsed_days) * 365, 2)
@@ -3217,7 +3228,13 @@ def staff_stats(
     annualized_comp = _annualized_run_rate(ytd_comp, ytd_start, today)
     annual_goal = annual_goal_or_default(settings.annual_wrvu_goal)
     month_to_date_wrvu = _sum_wrvu(month_to_date_scans)
-    monthly_pace = monthly_goal_pace(today=today, annual_goal=annual_goal, month_to_date_wrvu=month_to_date_wrvu)
+    daily_wrvu_by_date = _month_daily_wrvu_by_date(all_scans, today)
+    monthly_pace = monthly_goal_pace(
+        today=today,
+        annual_goal=annual_goal,
+        month_to_date_wrvu=month_to_date_wrvu,
+        daily_wrvu_by_date=daily_wrvu_by_date,
+    )
     gap_to_goal_wrvu = round(annual_goal - annualized_wrvu, 2)
     seven_day_wrvu = _sum_wrvu(seven_day_scans)
     previous_seven_day_wrvu = _sum_wrvu(previous_seven_day_scans)
@@ -3249,6 +3266,18 @@ def staff_stats(
         "is_goal_met": monthly_pace.is_goal_met,
         "pace_elapsed_days": monthly_pace.elapsed_days,
         "pace_days_in_month": monthly_pace.days_in_month,
+        "active_pace_days": monthly_pace.active_pace_days,
+        "daily_run_rate_wrvu": monthly_pace.daily_run_rate_wrvu,
+        "tracking_delta_vs_goal_wrvu": monthly_pace.tracking_delta_vs_goal_wrvu,
+        "pace_series": [
+            {
+                "date": point.date,
+                "day_wrvu": point.day_wrvu,
+                "tracking_to_wrvu": point.tracking_to_wrvu,
+                "delta_vs_goal_wrvu": point.delta_vs_goal_wrvu,
+            }
+            for point in monthly_pace.pace_series
+        ],
         "annualized_wrvu_run_rate": annualized_wrvu,
         "annualized_comp_run_rate": annualized_comp,
         "goal_progress_percent": round((annualized_wrvu / annual_goal) * 100, 1) if annual_goal > 0 else 0.0,
