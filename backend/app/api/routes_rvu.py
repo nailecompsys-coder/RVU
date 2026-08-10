@@ -33,6 +33,7 @@ from app.services.rvu_goal_service import (
     monthly_goal_pace,
     monthly_to_annual_goal,
 )
+from app.services.rvu_scorecard_service import build_scorecard
 from app.services.rvu_payment_service import RvuPaymentService
 from app.services.rvu_retention_policy import charge_scan_images_enabled, op_note_images_enabled
 from app.services.rvu_rules_service import (
@@ -3459,6 +3460,45 @@ def staff_stats(
         "procedure_breakdown": procedure_breakdown,
         "setting_breakdown": _build_setting_breakdown(period_scans, cf=cf),
     }
+
+
+def _monthly_actual_wrvu_map(scans: list[RvuScan], today: date) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for scan in scans:
+        if not _is_verified_scan(scan):
+            continue
+        effective = _effective_scan_date(scan) or today
+        key = effective.strftime("%Y-%m")
+        totals[key] = round(float(totals.get(key, 0.0)) + _scan_wrvu(scan), 2)
+    return totals
+
+
+@router.get("/scorecard")
+def staff_scorecard(
+    months: int = 12,
+    db: Session = Depends(get_db),
+    auth: tuple[RvuStaff, object] = Depends(get_current_staff),
+):
+    """12-month expected vs actual scorecard (rolling weighted expected)."""
+    surgeon, _ = auth
+    month_count = max(3, min(int(months or 12), 24))
+    settings = _get_or_create_user_settings(db, surgeon.id)
+    cf = float(settings.cf or APP_CF_DEFAULT)
+    annual_goal = annual_goal_or_default(settings.annual_wrvu_goal)
+    monthly_fallback = annual_to_monthly_goal(annual_goal)
+    today = datetime.now().date()
+    all_scans = _load_staff_scans(db, surgeon.id)
+    payload = build_scorecard(
+        today=today,
+        actual_by_month=_monthly_actual_wrvu_map(all_scans, today),
+        cf=cf,
+        monthly_goal_fallback=monthly_fallback,
+        months=month_count,
+    )
+    payload["surgeon_name"] = getattr(surgeon, "full_name", None) or " ".join(
+        part for part in (getattr(surgeon, "first_name", ""), getattr(surgeon, "last_name", "")) if part
+    ).strip()
+    return payload
 
 
 @router.get("/scans/{scan_id}")
