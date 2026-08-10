@@ -802,6 +802,70 @@ def _canonicalize_provider_lines(
     return out
 
 
+def _credited_surgeon_from_lines(
+    db: Session,
+    lines: list[dict] | None,
+    *,
+    fallback: RvuStaff,
+) -> RvuStaff:
+    """Return the unique primary (non-assist) physician credited on the lines, else fallback.
+
+    Used so captures entered "for Schroeder" land on Schroeder's dashboard after verify,
+    instead of staying owned by the staff member who typed them in.
+    """
+    if not lines or fallback is None:
+        return fallback
+    active_staff = db.query(RvuStaff).filter(RvuStaff.is_active == True).all()  # noqa: E712
+    matched: list[RvuStaff] = []
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        role = str(line.get("provider_role") or "unknown").strip().lower()
+        is_assist = (
+            bool(line.get("is_assist"))
+            or role in ("pa", "assistant")
+            or "AS" in str(line.get("modifier") or "").upper()
+        )
+        if is_assist:
+            continue
+        provider_name = str(line.get("provider_name") or "").strip()
+        if not provider_name:
+            continue
+        hit = next((staff for staff in active_staff if _provider_exactly_matches_staff(provider_name, staff)), None)
+        if hit is None:
+            continue
+        if _provider_role_for_staff(hit) == "pa":
+            continue
+        if not _portal_dashboard_is_provider(hit):
+            continue
+        matched.append(hit)
+    unique_ids = {staff.id for staff in matched}
+    if len(unique_ids) != 1:
+        return fallback
+    credited_id = next(iter(unique_ids))
+    return next(staff for staff in matched if staff.id == credited_id)
+
+
+def _apply_credited_surgeon_ownership(
+    db: Session,
+    scan: RvuScan,
+    lines: list[dict] | None,
+    *,
+    fallback: RvuStaff,
+) -> RvuStaff:
+    """Point scan.surgeon_id at the credited primary physician when uniquely matched."""
+    credited = _credited_surgeon_from_lines(db, lines, fallback=fallback)
+    if credited is not None and credited.id != scan.surgeon_id:
+        log.info(
+            "reassigning scan ownership scan_id=%s from_staff=%s to_staff=%s",
+            scan.id,
+            scan.surgeon_id,
+            credited.id,
+        )
+        scan.surgeon_id = credited.id
+    return credited
+
+
 def _maybe_fanout_charge_capture_for_other_surgeons(
     db: Session,
     *,
@@ -1032,6 +1096,15 @@ def _apply_pending_scan_result(
             mrn=scan.mrn,
             service_date=scan.service_date,
         )
+    if verified:
+        owner_fallback = surgeon if surgeon is not None else db.get(RvuStaff, scan.surgeon_id)
+        if owner_fallback is not None:
+            _apply_credited_surgeon_ownership(
+                db,
+                scan,
+                _primary_line_items(enriched if isinstance(enriched, list) else []),
+                fallback=owner_fallback,
+            )
     db.commit()
     db.refresh(scan)
     _persist_ai_runs(db, scan, cap)
@@ -3447,9 +3520,17 @@ def patch_scan(
         mrn=scan.mrn,
         service_date=scan.service_date,
     ) if scan.scan_status == "pending_review" else None
+    response_owner = surgeon
+    if scan.scan_status == "verified":
+        response_owner = _apply_credited_surgeon_ownership(
+            db,
+            scan,
+            _primary_line_items(enriched if enriched else _parse_line_items(scan.line_items)),
+            fallback=surgeon,
+        )
     db.commit()
     db.refresh(scan)
-    return _scan_history_dict(scan, surgeon)
+    return _scan_history_dict(scan, response_owner)
 
 
 @router.post("/scans/{scan_id}/verify")
@@ -3482,9 +3563,11 @@ def verify_scan(
         scan.total_payment = round(sum(float(x.get("payment") or 0.0) for x in primary_lines), 2)
     scan.scan_status = "verified"
     scan.review_reason = None
+    # Credit the primary surgeon selected on the lines (e.g. Schroeder), not only the capturer.
+    owner = _apply_credited_surgeon_ownership(db, scan, primary_lines, fallback=surgeon)
     db.commit()
     db.refresh(scan)
-    return _scan_history_dict(scan, surgeon)
+    return _scan_history_dict(scan, owner)
 
 
 @router.delete("/scans/{scan_id}", status_code=204)
