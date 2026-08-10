@@ -413,15 +413,43 @@ def _sanitize_client_request_id(value: str | None) -> str | None:
     return raw[:128]
 
 
-def _find_existing_request_scan(db: Session, surgeon_id: int, request_id: str | None) -> RvuScan | None:
+def _find_existing_request_scan(db: Session, actor_id: int, request_id: str | None) -> RvuScan | None:
     if not request_id:
         return None
     return (
         db.query(RvuScan)
-        .filter(RvuScan.surgeon_id == surgeon_id, RvuScan.client_request_id == request_id)
+        .filter(
+            RvuScan.client_request_id == request_id,
+            or_(
+                RvuScan.surgeon_id == actor_id,
+                RvuScan.entered_by_staff_id == actor_id,
+            ),
+        )
         .order_by(desc(RvuScan.scanned_at))
         .first()
     )
+
+
+def _staff_can_access_scan(scan: RvuScan, staff: RvuStaff) -> bool:
+    """Owner (credited surgeon) or the staff member who entered the capture."""
+    if scan.surgeon_id == staff.id:
+        return True
+    entered_by = getattr(scan, "entered_by_staff_id", None)
+    return entered_by is not None and entered_by == staff.id
+
+
+def _load_staff_accessible_scan(db: Session, scan_id: int, staff: RvuStaff) -> RvuScan | None:
+    scan = db.query(RvuScan).filter(RvuScan.id == scan_id).first()
+    if not scan or not _staff_can_access_scan(scan, staff):
+        return None
+    return scan
+
+
+def _response_owner_for_scan(db: Session, scan: RvuScan, actor: RvuStaff) -> RvuStaff:
+    if scan.surgeon_id == actor.id:
+        return actor
+    owner = db.get(RvuStaff, scan.surgeon_id)
+    return owner if owner is not None else actor
 
 
 def _get_or_create_user_settings(db: Session, surgeon_id: int) -> RvuUserSettings:
@@ -810,8 +838,8 @@ def _credited_surgeon_from_lines(
 ) -> RvuStaff:
     """Return the unique primary (non-assist) physician credited on the lines, else fallback.
 
-    Used so captures entered "for Schroeder" land on Schroeder's dashboard after verify,
-    instead of staying owned by the staff member who typed them in.
+    Ownership rule: CPT work attributed to a named physician belongs to that physician's
+    dashboard/history/stats — not the staff member who typed the capture.
     """
     if not lines or fallback is None:
         return fallback
@@ -852,18 +880,56 @@ def _apply_credited_surgeon_ownership(
     lines: list[dict] | None,
     *,
     fallback: RvuStaff,
+    entered_by: RvuStaff | None = None,
 ) -> RvuStaff:
-    """Point scan.surgeon_id at the credited primary physician when uniquely matched."""
+    """Point scan.surgeon_id at the credited primary physician when uniquely matched.
+
+    Preserves entered_by_staff_id so the capturer can still open/edit the scan after
+    ownership moves to the credited surgeon.
+    """
+    if entered_by is not None and getattr(scan, "entered_by_staff_id", None) is None:
+        scan.entered_by_staff_id = entered_by.id
     credited = _credited_surgeon_from_lines(db, lines, fallback=fallback)
     if credited is not None and credited.id != scan.surgeon_id:
+        if getattr(scan, "entered_by_staff_id", None) is None:
+            scan.entered_by_staff_id = scan.surgeon_id
         log.info(
-            "reassigning scan ownership scan_id=%s from_staff=%s to_staff=%s",
+            "reassigning scan ownership scan_id=%s from_staff=%s to_staff=%s entered_by=%s",
             scan.id,
             scan.surgeon_id,
             credited.id,
+            scan.entered_by_staff_id,
         )
         scan.surgeon_id = credited.id
     return credited
+
+
+def _repair_misowned_scans(db: Session) -> int:
+    """One-shot backfill: move existing captures to the physician named on primary lines."""
+    changed = 0
+    scans = (
+        db.query(RvuScan)
+        .filter(RvuScan.line_items.isnot(None), RvuScan.line_items != "", RvuScan.line_items != "[]")
+        .all()
+    )
+    for scan in scans:
+        lines = _parse_line_items(scan.line_items)
+        primary = _primary_line_items(lines)
+        if not primary:
+            continue
+        fallback = db.get(RvuStaff, scan.surgeon_id)
+        if fallback is None:
+            continue
+        credited = _credited_surgeon_from_lines(db, primary, fallback=fallback)
+        if credited.id == scan.surgeon_id:
+            continue
+        if getattr(scan, "entered_by_staff_id", None) is None:
+            scan.entered_by_staff_id = scan.surgeon_id
+        scan.surgeon_id = credited.id
+        changed += 1
+    if changed:
+        db.commit()
+    return changed
 
 
 def _maybe_fanout_charge_capture_for_other_surgeons(
@@ -1037,6 +1103,7 @@ def _create_pending_scan_stub(
         main_cpt_status=None,
         review_reason="Processing charge capture",
         client_request_id=client_request_id,
+        entered_by_staff_id=surgeon.id,
     )
 
 
@@ -1054,6 +1121,7 @@ def _apply_pending_scan_result(
     elapsed: float,
     verified: bool = False,
     review_reason_override: str | None = None,
+    entered_by: RvuStaff | None = None,
 ) -> RvuScan:
     rows = payload["rows"]
     total = payload["total_payment"]
@@ -1096,15 +1164,16 @@ def _apply_pending_scan_result(
             mrn=scan.mrn,
             service_date=scan.service_date,
         )
-    if verified:
-        owner_fallback = surgeon if surgeon is not None else db.get(RvuStaff, scan.surgeon_id)
-        if owner_fallback is not None:
-            _apply_credited_surgeon_ownership(
-                db,
-                scan,
-                _primary_line_items(enriched if isinstance(enriched, list) else []),
-                fallback=owner_fallback,
-            )
+    owner_fallback = surgeon if surgeon is not None else db.get(RvuStaff, scan.surgeon_id)
+    actor = entered_by or owner_fallback
+    if owner_fallback is not None:
+        _apply_credited_surgeon_ownership(
+            db,
+            scan,
+            _primary_line_items(enriched if isinstance(enriched, list) else []),
+            fallback=owner_fallback,
+            entered_by=actor,
+        )
     db.commit()
     db.refresh(scan)
     _persist_ai_runs(db, scan, cap)
@@ -1139,9 +1208,14 @@ def _persist_capture_result(
     synced_cpts = _cpts_for_surgeon_lines(enriched)
     if not synced_cpts:
         synced_cpts = list(payload.get("cpts") or [])
+    owner = _credited_surgeon_from_lines(
+        db,
+        _primary_line_items(enriched if isinstance(enriched, list) else []),
+        fallback=surgeon,
+    )
     scan = payment_svc.save_scan(
         db,
-        surgeon.id,
+        owner.id,
         synced_cpts,
         locality,
         loc_name,
@@ -1172,6 +1246,7 @@ def _persist_capture_result(
             )
         ),
         client_request_id=client_request_id,
+        entered_by_staff_id=surgeon.id,
     )
     _persist_ai_runs(db, scan, cap)
     _maybe_fanout_charge_capture_for_other_surgeons(db, scan=scan, cap_lines=source_lines if isinstance(source_lines, list) else None)
@@ -1804,6 +1879,11 @@ async def commit_scan(
     enriched = payment_svc.enrich_line_items(rows, line_dicts)
     synced_commit = _cpts_for_surgeon_lines(enriched) or clean
     sd = payment_svc.parse_service_date(service_date)
+    owner = _credited_surgeon_from_lines(
+        db,
+        _primary_line_items(enriched if isinstance(enriched, list) else []),
+        fallback=surgeon,
+    )
 
     actual_kb = image_kb
     if image and image.filename:
@@ -1821,7 +1901,7 @@ async def commit_scan(
 
     scan = payment_svc.save_scan(
         db,
-        surgeon.id,
+        owner.id,
         synced_commit,
         locality,
         loc_name,
@@ -1837,6 +1917,7 @@ async def commit_scan(
         mrn=_normalized_mrn_or_none(mrn),
         line_items_json=json.dumps(enriched),
         image_bytes=None,
+        entered_by_staff_id=surgeon.id,
     )
     return {
         "id": scan.id,
@@ -2130,6 +2211,7 @@ async def vision_scan(
             elapsed=elapsed_fb,
             verified=False,
             review_reason_override=rr[:255],
+            entered_by=surgeon,
         )
         return _finalize_capture_response(
             payload=fb_payload,
@@ -2172,6 +2254,7 @@ async def vision_scan(
             elapsed=elapsed,
             verified=False,
             review_reason_override=gate_reason,
+            entered_by=surgeon,
         )
     return _finalize_capture_response(
         payload=payload,
@@ -3385,13 +3468,10 @@ def staff_get_scan(
     auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
-    scan = db.query(RvuScan).filter(
-        RvuScan.id == scan_id,
-        RvuScan.surgeon_id == surgeon.id,
-    ).first()
+    scan = _load_staff_accessible_scan(db, scan_id, surgeon)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    return _entry_row_dict(scan, surgeon)
+    return _entry_row_dict(scan, _response_owner_for_scan(db, scan, surgeon))
 
 @router.post("/manual-draft")
 def create_manual_draft(
@@ -3430,6 +3510,7 @@ def create_manual_draft(
             mrn=body.mrn,
             service_date=payment_svc.parse_service_date(body.service_date),
         ),
+        entered_by_staff_id=surgeon.id,
     )
     return _scan_history_dict(scan, surgeon)
 
@@ -3441,11 +3522,9 @@ def patch_scan(
     db: Session = Depends(get_db),
     auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
-    """RvuStaff edits their own scan — recalculates RVU/payment and persists."""
+    """Edit a scan the staff owns or originally entered — recalculates RVU/payment."""
     surgeon, _ = auth
-    scan = db.query(RvuScan).filter(
-        RvuScan.id == scan_id, RvuScan.surgeon_id == surgeon.id,
-    ).first()
+    scan = _load_staff_accessible_scan(db, scan_id, surgeon)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     clean = payment_svc.clean_cpt_codes(body.cpts or [])
@@ -3520,14 +3599,14 @@ def patch_scan(
         mrn=scan.mrn,
         service_date=scan.service_date,
     ) if scan.scan_status == "pending_review" else None
-    response_owner = surgeon
-    if scan.scan_status == "verified":
-        response_owner = _apply_credited_surgeon_ownership(
-            db,
-            scan,
-            _primary_line_items(enriched if enriched else _parse_line_items(scan.line_items)),
-            fallback=surgeon,
-        )
+    # Ownership follows the primary provider on the lines for pending and verified alike.
+    response_owner = _apply_credited_surgeon_ownership(
+        db,
+        scan,
+        _primary_line_items(enriched if enriched else _parse_line_items(scan.line_items)),
+        fallback=_response_owner_for_scan(db, scan, surgeon),
+        entered_by=surgeon,
+    )
     db.commit()
     db.refresh(scan)
     return _scan_history_dict(scan, response_owner)
@@ -3540,9 +3619,7 @@ def verify_scan(
     auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
     surgeon, _ = auth
-    scan = db.query(RvuScan).filter(
-        RvuScan.id == scan_id, RvuScan.surgeon_id == surgeon.id,
-    ).first()
+    scan = _load_staff_accessible_scan(db, scan_id, surgeon)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     missing_fields: list[str] = []
@@ -3563,8 +3640,13 @@ def verify_scan(
         scan.total_payment = round(sum(float(x.get("payment") or 0.0) for x in primary_lines), 2)
     scan.scan_status = "verified"
     scan.review_reason = None
-    # Credit the primary surgeon selected on the lines (e.g. Schroeder), not only the capturer.
-    owner = _apply_credited_surgeon_ownership(db, scan, primary_lines, fallback=surgeon)
+    owner = _apply_credited_surgeon_ownership(
+        db,
+        scan,
+        primary_lines,
+        fallback=_response_owner_for_scan(db, scan, surgeon),
+        entered_by=surgeon,
+    )
     db.commit()
     db.refresh(scan)
     return _scan_history_dict(scan, owner)
@@ -3576,11 +3658,9 @@ def delete_scan(
     db: Session = Depends(get_db),
     auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
-    """RvuStaff deletes their own scan record."""
+    """Delete a scan the staff owns or originally entered."""
     surgeon, _ = auth
-    scan = db.query(RvuScan).filter(
-        RvuScan.id == scan_id, RvuScan.surgeon_id == surgeon.id,
-    ).first()
+    scan = _load_staff_accessible_scan(db, scan_id, surgeon)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     db.query(RvuScanAiRun).filter(RvuScanAiRun.scan_id == scan_id).delete(synchronize_session=False)
@@ -3595,13 +3675,11 @@ def get_scan_image(
     db: Session = Depends(get_db),
     auth: tuple[RvuStaff, object] = Depends(get_current_staff),
 ):
-    """Return the original scan image for a surgeon's own scan."""
+    """Return the original scan image for an owned or entered scan."""
     if not charge_scan_images_enabled():
         raise HTTPException(status_code=404, detail="Scan image storage is disabled")
     surgeon, _ = auth
-    scan = db.query(RvuScan).filter(
-        RvuScan.id == scan_id, RvuScan.surgeon_id == surgeon.id,
-    ).first()
+    scan = _load_staff_accessible_scan(db, scan_id, surgeon)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     if not _stored_binary_usable(scan.image_data):

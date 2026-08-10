@@ -23,10 +23,13 @@ class RvuScan(Base):
         Index("ix_rvu_scans_surgeon_service_date", "surgeon_id", "service_date"),
         Index("ix_rvu_scans_surgeon_scan_status", "surgeon_id", "scan_status"),
         Index("ix_rvu_scans_surgeon_request_id", "surgeon_id", "client_request_id"),
+        Index("ix_rvu_scans_entered_by_request_id", "entered_by_staff_id", "client_request_id"),
     )
 
     id = Column(Integer, primary_key=True)
     surgeon_id = Column(Integer, ForeignKey("rvu_staff.id"), nullable=False)
+    # Staff who typed the capture (may differ from surgeon_id when entering for another physician).
+    entered_by_staff_id = Column(Integer, ForeignKey("rvu_staff.id"), nullable=True)
     scanned_at = Column(DateTime, server_default=func.now())
     cpts = Column(Text)
     locality_num = Column(String(10))

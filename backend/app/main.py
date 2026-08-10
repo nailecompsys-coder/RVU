@@ -73,10 +73,18 @@ def _ensure_rvu_schema(conn: Connection) -> None:
         conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS review_reason VARCHAR(255)"))
     if "client_request_id" not in columns:
         conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS client_request_id VARCHAR(128)"))
+    if "entered_by_staff_id" not in columns:
+        conn.execute(text("ALTER TABLE rvu_scans ADD COLUMN IF NOT EXISTS entered_by_staff_id INTEGER"))
     conn.execute(
         text(
             "CREATE INDEX IF NOT EXISTS ix_rvu_scans_surgeon_request_id "
             "ON rvu_scans (surgeon_id, client_request_id)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_rvu_scans_entered_by_request_id "
+            "ON rvu_scans (entered_by_staff_id, client_request_id)"
         )
     )
     conn.execute(text("UPDATE rvu_scans SET scan_status = 'verified' WHERE scan_status IS NULL"))
@@ -117,10 +125,30 @@ def _initialize_schema_once() -> None:
             conn.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _SCHEMA_INIT_LOCK_ID})
 
 
+def _repair_scan_ownership_once() -> None:
+    """Move existing captures to the physician named on primary CPT lines."""
+    from app.api.routes_rvu import _repair_misowned_scans
+    from app.database import SessionLocal
+    import logging
+
+    log = logging.getLogger("rvu.startup")
+    db = SessionLocal()
+    try:
+        changed = _repair_misowned_scans(db)
+        if changed:
+            log.info("repaired ownership on %s existing scan(s)", changed)
+    except Exception:
+        log.exception("scan ownership repair failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Tables may already exist; create_all is safe with checkfirst
     _initialize_schema_once()
+    _repair_scan_ownership_once()
     yield
 
 

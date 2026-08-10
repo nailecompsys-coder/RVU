@@ -520,9 +520,11 @@ class RvuPaymentService:
         main_cpt_status: str | None = None,
         review_reason: str | None = None,
         client_request_id: str | None = None,
+        entered_by_staff_id: int | None = None,
     ) -> RvuScan:
         scan = RvuScan(
             surgeon_id=surgeon_id,
+            entered_by_staff_id=entered_by_staff_id,
             scanned_at=datetime.now(timezone.utc),
             cpts=json.dumps(cpts),
             locality_num=locality,
