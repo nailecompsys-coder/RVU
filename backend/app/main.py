@@ -144,11 +144,31 @@ def _repair_scan_ownership_once() -> None:
         db.close()
 
 
+def _repair_modifier_rules_once() -> None:
+    """Restore known modifier factors wiped by mobile factor=1 saves."""
+    from app.database import SessionLocal
+    from app.services.rvu_rules_service import repair_poisoned_modifier_overrides
+    import logging
+
+    log = logging.getLogger("rvu.startup")
+    db = SessionLocal()
+    try:
+        changed = repair_poisoned_modifier_overrides(db)
+        if changed:
+            log.info("repaired poisoned modifier override(s): %s", changed)
+    except Exception:
+        log.exception("modifier rule repair failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Tables may already exist; create_all is safe with checkfirst
     _initialize_schema_once()
     _repair_scan_ownership_once()
+    _repair_modifier_rules_once()
     yield
 
 

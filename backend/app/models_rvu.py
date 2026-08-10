@@ -52,7 +52,8 @@ class RvuScan(Base):
     review_reason = Column(String(255), nullable=True)
     client_request_id = Column(String(128), nullable=True)
 
-    surgeon = relationship("RvuStaff")
+    surgeon = relationship("RvuStaff", foreign_keys=[surgeon_id], back_populates="scans")
+    entered_by = relationship("RvuStaff", foreign_keys=[entered_by_staff_id])
 
 
 class RvuScanAiRun(Base):

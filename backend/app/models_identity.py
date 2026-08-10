@@ -42,7 +42,7 @@ class RvuStaff(Base):
 
     devices = relationship("RvuStaffDevice", back_populates="staff", cascade="all, delete-orphan")
     magic_links = relationship("RvuMagicLink", back_populates="staff", cascade="all, delete-orphan")
-    scans = relationship("RvuScan", back_populates="surgeon")
+    scans = relationship("RvuScan", back_populates="surgeon", foreign_keys="RvuScan.surgeon_id")
     user_settings = relationship("RvuUserSettings", back_populates="surgeon", uselist=False)
     op_notes = relationship("RvuOpNote", back_populates="surgeon")
 

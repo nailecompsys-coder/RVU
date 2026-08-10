@@ -150,9 +150,24 @@ def get_effective_modifier_rules(db: Session) -> dict[str, dict[str, object]]:
         rule = rules.get(key, {"code": key, "factor": 1.0, "desc": key})
         factor = _coerce_float(raw.get("factor"))
         desc = str(raw.get("desc") or "").strip()
+        default_factor = DEFAULT_MODIFIER_FACTORS.get(key)
+        source = str(raw.get("source") or "").strip().lower()
+        # Mobile used to PATCH known codes with factor=1 and wipe bilateral/assist math.
+        if (
+            default_factor is not None
+            and factor is not None
+            and abs(float(factor) - 1.0) < 1e-9
+            and abs(float(default_factor) - 1.0) > 1e-9
+            and source in ("mobile", "mobile-added", "")
+        ):
+            factor = default_factor
         if factor is not None:
             rule["factor"] = factor
-        if desc:
+        if desc and desc.lower() != "mobile-added modifier":
+            rule["desc"] = desc
+        elif desc.lower() == "mobile-added modifier" and key in DEFAULT_MODIFIER_DESC:
+            rule["desc"] = DEFAULT_MODIFIER_DESC[key]
+        elif desc:
             rule["desc"] = desc
         for field in ("source", "added_by_staff_id", "added_by_staff_name", "added_at"):
             if raw.get(field) not in (None, ""):
@@ -170,6 +185,38 @@ def list_modifier_rules(db: Session) -> list[dict[str, object]]:
     return [rules[code] for code in sorted(rules)]
 
 
+def repair_poisoned_modifier_overrides(db: Session) -> int:
+    """Reset mobile factor=1 overrides that wiped known product modifier math."""
+    overrides = _load_rule_config(db, MODIFIER_RULE_CONFIG_ID)
+    changed = 0
+    for code, raw in list(overrides.items()):
+        if not isinstance(raw, dict):
+            continue
+        key = _clean_modifier_code(str(code or ""))
+        if not key or key not in DEFAULT_MODIFIER_FACTORS:
+            continue
+        default_factor = float(DEFAULT_MODIFIER_FACTORS[key])
+        factor = _coerce_float(raw.get("factor"))
+        desc = str(raw.get("desc") or "").strip()
+        dirty = False
+        if factor is not None and abs(float(factor) - 1.0) < 1e-9 and abs(default_factor - 1.0) > 1e-9:
+            raw["factor"] = default_factor
+            dirty = True
+        stored = _coerce_float(raw.get("factor"))
+        if key == "80" and stored is not None and abs(float(stored) - 0.16) < 1e-9:
+            raw["factor"] = default_factor
+            dirty = True
+        if desc.lower() == "mobile-added modifier":
+            raw["desc"] = DEFAULT_MODIFIER_DESC.get(key, key)
+            dirty = True
+        if dirty:
+            overrides[key] = raw
+            changed += 1
+    if changed:
+        _save_rule_config(db, MODIFIER_RULE_CONFIG_ID, overrides)
+    return changed
+
+
 def patch_modifier_rule(
     db: Session,
     code: str,
@@ -184,15 +231,34 @@ def patch_modifier_rule(
 ) -> dict[str, object]:
     key = _clean_modifier_code(code)
     if not key:
-        raise ValueError("Modifier code is required")
+        raise ValueError("modifier code is required")
     overrides = _load_rule_config(db, MODIFIER_RULE_CONFIG_ID)
     current = overrides.get(key, {})
     if not isinstance(current, dict):
         current = {}
-    if factor is not None:
-        current["factor"] = round(float(factor), 4)
+    source_value = (source.strip() if isinstance(source, str) else None) or str(current.get("source") or "")
+    source_norm = source_value.strip().lower()
+    default_factor = DEFAULT_MODIFIER_FACTORS.get(key)
+    effective_factor = factor
+    # Never let mobile "add modifier" clobber known product factors with 1.0.
+    if (
+        default_factor is not None
+        and effective_factor is not None
+        and abs(float(effective_factor) - 1.0) < 1e-9
+        and abs(float(default_factor) - 1.0) > 1e-9
+        and source_norm in ("mobile", "mobile-added", "")
+    ):
+        effective_factor = default_factor
+    if effective_factor is None and key in DEFAULT_MODIFIER_FACTORS and "factor" not in current:
+        effective_factor = float(DEFAULT_MODIFIER_FACTORS[key])
+    if effective_factor is not None:
+        current["factor"] = round(float(effective_factor), 4)
     if desc is not None:
-        current["desc"] = desc.strip()
+        clean_desc = desc.strip()
+        if clean_desc.lower() == "mobile-added modifier" and key in DEFAULT_MODIFIER_DESC:
+            current["desc"] = DEFAULT_MODIFIER_DESC[key]
+        else:
+            current["desc"] = clean_desc
     if source is not None:
         current["source"] = source.strip() or "portal"
     if needs_review is not None:

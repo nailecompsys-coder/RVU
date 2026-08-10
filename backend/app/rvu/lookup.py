@@ -21,7 +21,7 @@ DEFAULT_MODIFIER_FACTORS: dict[str, float] = {
     "66": 1.00,   # Team surgery
     "78": 0.70,   # Unplanned return to OR
     "79": 1.00,   # Unrelated procedure during postop period
-    "80": 0.16,   # Assistant surgeon
+    "80": 0.20,   # Assistant surgeon (product rule: 20% of primary wRVU)
     "81": 0.10,   # Minimum assistant surgeon
     "82": 0.16,   # Assistant when qualified resident unavailable
     "AS": 0.20,   # PA/NP assistant at surgery

@@ -182,5 +182,15 @@ class RvuCalculationTests(unittest.TestCase):
         self.assertEqual(total, 285.98)
 
 
+    def test_modifier_80_assistant_is_twenty_percent(self):
+        row = calc_payment("49002", "99", True, 41.0, modifier="80")
+
+        self.assertEqual(row.modifier_factor, 0.2)
+        self.assertAlmostEqual(row.work_rvu, round(row.work_rvu / 0.2 * 0.2, 2), places=2)
+        base = calc_payment("49002", "99", True, 41.0, modifier="")
+        self.assertAlmostEqual(row.work_rvu, round(base.work_rvu * 0.2, 2))
+        self.assertAlmostEqual(row.payment, round(base.payment * 0.2, 2))
+
+
 if __name__ == "__main__":
     unittest.main()
