@@ -12,10 +12,17 @@ def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     return idx // 12, idx % 12 + 1
 
 
-def month_keys_ending(today: date, count: int) -> list[str]:
-    """Return YYYY-MM keys for `count` months ending at today's month (oldest first)."""
+def month_keys_ending(today: date, count: int, *, complete_months_only: bool = True) -> list[str]:
+    """Return YYYY-MM keys for `count` months (oldest first).
+
+    By default ends at the last *complete* calendar month so the in-progress
+    current month does not zero-out surprise / hero totals mid-month.
+    """
     keys: list[str] = []
-    year, month = today.year, today.month
+    if complete_months_only:
+        year, month = _shift_month(today.year, today.month, -1)
+    else:
+        year, month = today.year, today.month
     for _ in range(count):
         keys.append(f"{year:04d}-{month:02d}")
         year, month = _shift_month(year, month, -1)
@@ -87,7 +94,12 @@ def build_scorecard(
         if key in display_keys:
             delta = round(actual - expected, 2)
             delta_pct = round((delta / expected) * 100, 1) if expected else 0.0
-            status = "beat" if delta >= 0 else "miss"
+            if expected == 0 and actual == 0:
+                status = "flat"
+            elif delta >= 0:
+                status = "beat"
+            else:
+                status = "miss"
             low, high = consensus_band(expected)
             series.append(
                 ScorecardMonth(
@@ -111,11 +123,16 @@ def build_scorecard(
     beat_total = round(actual_total - expected_total, 2)
     beat_pct = round((beat_total / expected_total) * 100, 1) if expected_total else 0.0
 
-    above = sum(1 for row in series if row.status == "beat")
-    below = len(series) - above
-    above_rate = round((above / len(series)) * 100, 1) if series else 0.0
+    scored = [row for row in series if row.status in ("beat", "miss")]
+    above = sum(1 for row in scored if row.status == "beat")
+    below = sum(1 for row in scored if row.status == "miss")
+    above_rate = round((above / len(scored)) * 100, 1) if scored else 0.0
 
-    latest = series[-1] if series else None
+    # Surprise = latest month with real signal (skip empty flat months).
+    latest = next(
+        (row for row in reversed(series) if row.status != "flat" and (row.actual_wrvu > 0 or row.expected_wrvu > 0)),
+        series[-1] if series else None,
+    )
     surprise = None
     if latest is not None:
         surprise = {
@@ -123,11 +140,16 @@ def build_scorecard(
             "label": latest.label,
             "beat_wrvu": latest.delta_wrvu,
             "beat_percent": latest.delta_percent,
-            "status": latest.status,
+            "status": latest.status if latest.status != "flat" else "beat",
         }
 
-    # Projection: weighted expected for next calendar month using all history including current.
-    next_year, next_month = _shift_month(today.year, today.month, 1)
+    # Projection: month after the last displayed (complete) month.
+    if series:
+        last_y = int(series[-1].month[:4])
+        last_m = int(series[-1].month[5:7])
+        next_year, next_month = _shift_month(last_y, last_m, 1)
+    else:
+        next_year, next_month = _shift_month(today.year, today.month, 1)
     projected = weighted_rolling_expected(prior, fallback=monthly_goal_fallback)
 
     actual_comp = round(actual_total * cf, 2)
