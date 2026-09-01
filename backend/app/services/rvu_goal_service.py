@@ -4,12 +4,18 @@ The database stores the goal annually for backward compatibility, while the
 mobile dashboard presents a monthly goal. Keep conversion and projection math in
 one place so route handlers stay focused on request/response assembly.
 
-Pace needle (tracking_to):
+Pace needle (pace_series tracking_to):
   daily_bar = month_goal / days_in_month
   active days = calendar days with captured wRVU > 0 (empty days skipped)
   run_rate = MTD / active_days
-  tracking_to = run_rate * days_in_month
+  series tracking_to = run_rate * days_in_month
   Starts on the goal line when there are no captures yet.
+
+Month-end projection / On pace:
+  remaining_days = days_in_month - elapsed_days  (future calendar days only)
+  projected = MTD + run_rate * remaining_days
+  On the last day this equals MTD. Elapsed empty days cannot still produce wRVU,
+  so a hot working-day average is not treated as if the full month were active.
 """
 from __future__ import annotations
 
@@ -73,6 +79,7 @@ def monthly_goal_pace(
     next_month_start = date(today.year + 1, 1, 1) if today.month == 12 else date(today.year, today.month + 1, 1)
     days_in_month = (next_month_start - month_start).days
     elapsed_days = max(today.day, 1)
+    remaining_days = max(days_in_month - elapsed_days, 0)
     mtd = round(float(month_to_date_wrvu), 2)
     daily_bar = round(monthly_goal / days_in_month, 2) if days_in_month else 0.0
     expected_to_date = round(daily_bar * elapsed_days, 2)
@@ -98,26 +105,29 @@ def monthly_goal_pace(
 
     if active_days > 0 and series:
         daily_run_rate = round(running / active_days, 2)
-        tracking_to = series[-1].tracking_to_wrvu
         # Prefer summed active days when a series exists; keep caller MTD if series empty.
         mtd = running
+        # Apply working-day run rate only to days that have not elapsed. Using
+        # run_rate * days_in_month pretends already-passed empty days will still
+        # produce wRVU, which is why Aug 31 can show "On pace" with a large gap.
+        projected_month_end = round(mtd + daily_run_rate * remaining_days, 2)
     else:
         daily_run_rate = daily_bar
-        tracking_to = monthly_goal
+        projected_month_end = monthly_goal
 
-    tracking_delta = round(tracking_to - monthly_goal, 2)
+    tracking_delta = round(projected_month_end - monthly_goal, 2)
     progress_percent = round((mtd / monthly_goal) * 100, 1) if monthly_goal > 0 else 0.0
-    pace_progress_percent = round((tracking_to / monthly_goal) * 100, 1) if monthly_goal > 0 else 0.0
+    pace_progress_percent = round((projected_month_end / monthly_goal) * 100, 1) if monthly_goal > 0 else 0.0
     is_goal_met = monthly_goal > 0 and mtd >= monthly_goal
     # Half-wRVU tolerance so rounded daily-bar days still read as on the goal line.
-    is_on_pace = is_goal_met or (monthly_goal > 0 and tracking_to + 0.5 >= monthly_goal)
+    is_on_pace = is_goal_met or (monthly_goal > 0 and projected_month_end + 0.5 >= monthly_goal)
 
     return MonthlyGoalPace(
         goal_wrvu=monthly_goal,
         month_to_date_wrvu=mtd,
         progress_percent=progress_percent,
         gap_wrvu=round(monthly_goal - mtd, 2),
-        projected_month_end_wrvu=tracking_to,
+        projected_month_end_wrvu=projected_month_end,
         days_in_month=days_in_month,
         elapsed_days=elapsed_days,
         daily_pace_wrvu=daily_bar,

@@ -67,7 +67,8 @@ def test_hot_day_moves_needle_above_goal_by_run_rate():
 
 
 def test_empty_day_does_not_enter_average():
-    # After hot streak, a zero day is skipped — needle unchanged.
+    # After hot streak, a zero day is skipped — series needle unchanged.
+    # Month-end projection drops because one remaining calendar day is gone.
     pace = monthly_goal_pace(
         today=date(2026, 8, 3),
         annual_goal=9000,
@@ -80,7 +81,9 @@ def test_empty_day_does_not_enter_average():
     )
 
     assert pace.active_pace_days == 2
-    assert pace.projected_month_end_wrvu == 930.0
+    assert pace.pace_series[-1].tracking_to_wrvu == 930.0
+    assert pace.projected_month_end_wrvu == 900.0
+    assert pace.is_on_pace is True
     assert len(pace.pace_series) == 2
 
 
@@ -98,8 +101,10 @@ def test_cold_day_pulls_needle_back_toward_goal():
 
     assert pace.active_pace_days == 3
     assert pace.daily_run_rate_wrvu == 25.0
-    assert pace.projected_month_end_wrvu == 775.0
-    assert pace.tracking_delta_vs_goal_wrvu == 25.0
+    # 75 already in + 25/day × 27 remaining days = 750, not 25 × 31.
+    assert pace.projected_month_end_wrvu == 750.0
+    assert pace.tracking_delta_vs_goal_wrvu == 0.0
+    assert pace.is_on_pace is True
 
 
 def test_monthly_goal_pace_goal_met():
@@ -112,3 +117,51 @@ def test_monthly_goal_pace_goal_met():
 
     assert pace.is_goal_met is True
     assert pace.is_on_pace is True
+
+
+def test_last_day_behind_goal_is_not_on_pace():
+    # Screenshot case: 575 of 700 on Aug 31. Working-day average × 31 would
+    # project ~891 and falsely say "On pace"; remaining days are 0 so finish = MTD.
+    daily = {date(2026, 8, day): 28.75 for day in range(1, 21)}
+    pace = monthly_goal_pace(
+        today=date(2026, 8, 31),
+        annual_goal=8400,
+        month_to_date_wrvu=575,
+        daily_wrvu_by_date=daily,
+    )
+
+    assert pace.goal_wrvu == 700.0
+    assert pace.month_to_date_wrvu == 575.0
+    assert pace.elapsed_days == 31
+    assert pace.active_pace_days == 20
+    assert pace.daily_run_rate_wrvu == 28.75
+    assert pace.projected_month_end_wrvu == 575.0
+    assert pace.gap_wrvu == 125.0
+    assert pace.is_goal_met is False
+    assert pace.is_on_pace is False
+
+
+def test_one_remaining_day_cannot_cover_a_large_gap():
+    daily = {date(2026, 8, day): 28.75 for day in range(1, 21)}
+    pace = monthly_goal_pace(
+        today=date(2026, 8, 30),
+        annual_goal=8400,
+        month_to_date_wrvu=575,
+        daily_wrvu_by_date=daily,
+    )
+
+    assert pace.projected_month_end_wrvu == 603.75
+    assert pace.is_on_pace is False
+
+
+def test_last_day_on_pace_when_goal_already_met():
+    pace = monthly_goal_pace(
+        today=date(2026, 8, 31),
+        annual_goal=8400,
+        month_to_date_wrvu=700,
+        daily_wrvu_by_date={date(2026, 8, 1): 700.0},
+    )
+
+    assert pace.is_goal_met is True
+    assert pace.is_on_pace is True
+    assert pace.projected_month_end_wrvu == 700.0
