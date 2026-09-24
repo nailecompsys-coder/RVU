@@ -1571,6 +1571,12 @@ def _run_vision_capture(
     return cap, payload, elapsed, vision_backend, mode
 
 
+@router.get("/health")
+def rvu_health():
+    """Public — same payload as /api/health for native clients that probe this path."""
+    return {"status": "ok", "service": "rvu"}
+
+
 @router.get("/localities")
 def localities():
     """Public — static CMS GPCI/fee-schedule data, no PII."""

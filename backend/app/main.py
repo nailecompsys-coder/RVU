@@ -14,7 +14,7 @@ try:
 except ImportError:
     pass
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,7 @@ from app import models_rvu  # noqa: F401
 from app.api.routes_auth import router as auth_router
 from app.api.routes_rvu import portal_router, router as rvu_router
 from app.database import Base, engine
+from app.spa_fallback import should_serve_spa
 from app.version_info import version_payload
 
 # Dev: repo root `frontend/dist`. Docker: set RVU_STATIC_DIST=/app/frontend/dist
@@ -188,7 +189,7 @@ app.include_router(rvu_router)
 app.include_router(portal_router)
 
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok", "service": "rvu"}
 
@@ -202,7 +203,9 @@ def api_version():
 if os.path.isdir(_DIST):
     app.mount("/assets", StaticFiles(directory=os.path.join(_DIST, "assets")), name="rvu-assets")
 
-    @app.get("/{full_path:path}", include_in_schema=False)
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def spa_fallback(full_path: str):
-        """Serve the React SPA index.html for all non-API routes."""
+        """Serve the React SPA for portal routes only. Unknown /api/* returns JSON 404."""
+        if not should_serve_spa(full_path):
+            raise HTTPException(status_code=404, detail="Not Found")
         return FileResponse(os.path.join(_DIST, "index.html"))
