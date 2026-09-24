@@ -26,7 +26,7 @@ def get_current_staff(
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not signed in. Open your magic link to register this device.",
+            detail="Not signed in.",
         )
     try:
         device_id = decode_subject_token(token, "surgeon")
